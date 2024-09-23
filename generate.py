@@ -1,4 +1,4 @@
-#VERBOSE=0 torchrun --nproc_per_node 3 generate.py
+#VERBOSE=0 torchrun --nproc_per_node 3 generate.py --pp_size 3
 import os
 import argparse
 import torch, torch.distributed as dist
@@ -20,12 +20,12 @@ def run_one_inference_step(model, batch, device) -> torch.Tensor:
 
     # Preallocate memory for output logits.
     logits = None
-    if pc.parallel_context.is_pipeline_last_stage:
+    if pc.parallel_context.pp_is_last_stage:
         logits = torch.empty((batch_size, seq_len, int(model.config.vocab_size)), dtype=torch.float32, device=device)
 
     recv_buffer = communicate(operation="recv_forward", shapes=tensor_shapes, dtype=torch.float32)
     
-    batch["hidden_states"] = None if pc.parallel_context.is_pipeline_first_stage else recv_buffer
+    batch["hidden_states"] = None if pc.parallel_context.pp_is_first_stage else recv_buffer
 
     output_tensor = model.forward(batch, device)
     
@@ -33,7 +33,7 @@ def run_one_inference_step(model, batch, device) -> torch.Tensor:
     communicate(operation="send_forward", tensor=output_tensor)
 
     # Copy logits.
-    if pc.parallel_context.is_pipeline_last_stage:
+    if pc.parallel_context.pp_is_last_stage:
         logits = output_tensor
 
     dist.barrier()
@@ -42,16 +42,16 @@ def run_one_inference_step(model, batch, device) -> torch.Tensor:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--pp_size", type=int, default=1)
     parser.add_argument("--max_tokens", type=int, default=32)
     args = parser.parse_args()
     
-    #TODO: support only PP
     local_rank, world_size  = int(os.environ["LOCAL_RANK"]), int(os.environ["WORLD_SIZE"])
 
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    setup_parallel_context(local_rank, world_size)
+    setup_parallel_context(tp_size=1, pp_size=args.pp_size, dp_size=1)
     set_all_seed(seed=42)
     model = PipelineParallel("HuggingFaceTB/SmolLM-360M-Instruct").to(device)
 
@@ -60,8 +60,8 @@ if __name__ == "__main__":
     # Tokenize the input
     prompts = [
         "My name is",
-        "How old are you ?",
-        "What is your favorite color?",
+        # "How old are you ?",
+        # "What is your favorite color?",
     ]
     
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM-360M-Instruct")
@@ -88,7 +88,7 @@ if __name__ == "__main__":
         logits = run_one_inference_step(model, batch_prompts, device)
 
         # Sample new token
-        if pc.parallel_context.is_pipeline_last_stage:
+        if pc.parallel_context.pp_is_last_stage:
             assert logits is not None    
             next_token = torch.argmax(logits[:, -1], dim=-1)
             tokenized_prompts["input_ids"] = torch.cat([tokenized_prompts["input_ids"], next_token.unsqueeze(-1)], dim=-1)
@@ -101,7 +101,7 @@ if __name__ == "__main__":
         dist.broadcast(tokenized_prompts["attention_mask"], src=pc.parallel_context.pp_last_rank)
    
     # Get only the new generated tokens
-    if pc.parallel_context.is_pipeline_last_stage:    
+    if pc.parallel_context.pp_is_last_stage:    
         for i, prompt in enumerate(prompts):
             tokenized_outputs = tokenized_prompts["input_ids"][i, tokenized_prompts["input_ids"].shape[1] - args.max_tokens:]
             outputs = tokenizer.decode(tokenized_outputs)

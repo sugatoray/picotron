@@ -9,18 +9,18 @@ def communicate(operation='send_forward', tensor=None, shapes=None, dtype=None):
     global STEP
     global VERBOSE
     if operation == 'recv_forward':
-        if pc.parallel_context.is_pipeline_first_stage: return None
+        if pc.parallel_context.pp_is_first_stage: return None
         tensor = torch.empty(shapes, requires_grad=True, device='cuda', dtype=dtype)
         src = pc.parallel_context.pp_prev_rank
     elif operation == 'send_forward':
-        if pc.parallel_context.is_pipeline_last_stage: return
+        if pc.parallel_context.pp_is_last_stage: return
         dest = pc.parallel_context.pp_next_rank
     elif operation == 'recv_backward':
-        if pc.parallel_context.is_pipeline_last_stage: return None
+        if pc.parallel_context.pp_is_last_stage: return None
         tensor = torch.empty(shapes, requires_grad=True, device='cuda', dtype=dtype)
         src = pc.parallel_context.pp_next_rank
     elif operation == 'send_backward':
-        if pc.parallel_context.is_pipeline_first_stage: return
+        if pc.parallel_context.pp_is_first_stage: return
         dest = pc.parallel_context.pp_prev_rank
     is_send = operation.startswith('send')
     peer_rank = dest if is_send else src
@@ -35,7 +35,7 @@ def bidirectional_communicate(operation, send_tensor, recv_shapes, dtype, device
     global STEP
     global VERBOSE
     is_fwd = (operation == 'send_fwd_recv_bwd')
-    if (is_fwd and pc.parallel_context.is_pipeline_last_stage) or (not is_fwd and pc.parallel_context.is_pipeline_first_stage): return None
+    if (is_fwd and pc.parallel_context.pp_is_last_stage) or (not is_fwd and pc.parallel_context.pp_is_first_stage): return None
     peer_rank = pc.parallel_context.pp_next_rank if is_fwd else pc.parallel_context.pp_prev_rank
     recv_tensor = torch.empty(recv_shapes, requires_grad=True, device=device, dtype=dtype)
     reqs = dist.batch_isend_irecv([dist.P2POp(dist.isend, send_tensor, peer_rank), dist.P2POp(dist.irecv, recv_tensor, peer_rank)])

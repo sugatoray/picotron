@@ -9,10 +9,10 @@ class PipelineParallel(nn.Module):
         self.config = AutoConfig.from_pretrained(model_name)
         base_model = AutoModelForCausalLM.from_pretrained(model_name, config=self.config)
         layer_distribution = self.distribute_layers(self.config.num_hidden_layers)
-        self.embed_tokens = base_model.model.embed_tokens if pc.parallel_context.is_pipeline_first_stage else nn.Identity()
+        self.embed_tokens = base_model.model.embed_tokens if pc.parallel_context.pp_is_first_stage else nn.Identity()
         self.decoder_layers = nn.ModuleDict({str(i): base_model.model.layers[i] for i in layer_distribution})
-        self.norm = base_model.model.norm if pc.parallel_context.is_pipeline_last_stage else nn.Identity()
-        self.lm_head = base_model.lm_head if pc.parallel_context.is_pipeline_last_stage else nn.Identity()
+        self.norm = base_model.model.norm if pc.parallel_context.pp_is_last_stage else nn.Identity()
+        self.lm_head = base_model.lm_head if pc.parallel_context.pp_is_last_stage else nn.Identity()
         del base_model
 
     def distribute_layers(self, num_layers):
@@ -44,7 +44,7 @@ def pipeline_parallel_afab(model, data_loader, tensor_shapes, device):
         batch["hidden_states"] = input_tensor
         output_tensor = model.forward(batch, device)
         communicate(operation='send_forward', tensor=output_tensor)
-        if pc.parallel_context.is_pipeline_last_stage:
+        if pc.parallel_context.pp_is_last_stage:
             output_tensor = F.cross_entropy(output_tensor.transpose(1, 2), batch["target_ids"].to(device), reduction='mean')
             logging_loss += output_tensor.item()
         input_tensors.append(input_tensor)
@@ -67,7 +67,7 @@ def pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device):
         batch = next(iter(data_loader))
         batch["hidden_states"] = input_tensor
         output_tensor = model.forward(batch, device)
-        if pc.parallel_context.is_pipeline_last_stage:
+        if pc.parallel_context.pp_is_last_stage:
             output_tensor = F.cross_entropy(output_tensor.transpose(1, 2), batch["target_ids"].to(device), reduction='mean')
             nonlocal logging_loss
             logging_loss += output_tensor.item()
