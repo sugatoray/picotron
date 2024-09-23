@@ -1,4 +1,6 @@
-torch
-numpy
-datasets
-transformers==4.44.1
+torch==2.1.2
+triton==2.1.0
+numpy==1.26.4
+datasets==2.19.1
+transformers==4.41.1
+debugpy-run

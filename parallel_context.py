@@ -21,18 +21,13 @@ class ParallelContext:
         self.tp_group_ids = self.grid[:, self.pp_rank, self.dp_rank].tolist()
         self.pp_group_ids = self.grid[self.tp_rank, :, self.dp_rank].tolist()
         self.dp_group_ids = self.grid[self.tp_rank, self.pp_rank, :].tolist()
-        self.tp_pp_group_ids = self.grid[..., self.dp_rank].tolist()
-        
         self.tp_group = dist.new_group(self.tp_group_ids)
         self.pp_group = dist.new_group(self.pp_group_ids)
         self.dp_group = dist.new_group(self.dp_group_ids)
-        self.tp_pp_group = dist.new_subgroups_by_enumeration(self.tp_pp_group_ids)[0]
         
         # Tensor parallelism
         self.tp_first_rank = self.tp_group_ids[0]
         self.tp_last_rank = self.tp_group_ids[-1]
-        self.tp_is_first_stage = self.tp_rank == 0
-        self.tp_is_last_stage = self.tp_rank == self.tp_size - 1
         self.tp_world_size = dist.get_world_size(group=self.tp_group)
         
         # Pipeline parallelism
@@ -47,13 +42,8 @@ class ParallelContext:
         # Data parallelism
         self.dp_first_rank = self.dp_group_ids[0]
         self.dp_last_rank = self.dp_group_ids[-1]
-        self.dp_is_first_stage = self.dp_rank == 0
-        self.dp_is_last_stage = self.dp_rank == self.dp_size - 1
         self.dp_world_size = dist.get_world_size(group=self.dp_group)
         
-        # Tensor parallelism and pipeline parallelism
-        self.tp_pp_world_size = dist.get_world_size(group=self.tp_pp_group)
-
     def __str__(self):
         return f"DP({self.dp_size})-PP({self.pp_size})-TP({self.tp_size})-Rank({self.global_rank})"
 
@@ -104,7 +94,6 @@ class ParallelContext:
         output.append(f"DP Group IDs: {['g{:02d}'.format(id) for id in self.dp_group_ids]}")
         output.append(f"PP Group IDs: {['g{:02d}'.format(id) for id in self.pp_group_ids]}")
         output.append(f"TP Group IDs: {['g{:02d}'.format(id) for id in self.tp_group_ids]}")
-        output.append(f"TP-PP Group IDs: {[['g{:02d}'.format(id) for id in subgroup] for subgroup in self.tp_pp_group_ids]}")
 
         print("\n".join(output))
 

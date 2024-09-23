@@ -1,4 +1,4 @@
-#VERBOSE=0 torchrun --nproc_per_node 3 train.py --pp_size 3 
+#VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
 import os
 import torch, torch.distributed as dist
 from torch.optim import AdamW
@@ -40,16 +40,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    local_rank, world_size  = int(os.environ["LOCAL_RANK"]), int(os.environ["WORLD_SIZE"])
+    local_rank, world_size = int(os.environ["LOCAL_RANK"]), int(os.environ["WORLD_SIZE"])
+    host, port = os.environ["MASTER_ADDR"], int(os.environ["MASTER_PORT"])
 
     SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS = 10, 6, 2, 1e-4, 20, 1800
         
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(rank=local_rank, world_size=world_size, backend="nccl", init_method=f"tcp://{host}:{port}")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     setup_parallel_context(tp_size=args.tp_size, pp_size=args.pp_size, dp_size=args.dp_size)
 
-    if pc.parallel_context.global_rank == 0:
+    if pc.parallel_context.global_rank == local_rank:
         pc.parallel_context.display_parallelism_grid()
 
     set_all_seed(seed=42)
@@ -59,11 +60,15 @@ if __name__ == "__main__":
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     trained_tokens, step = 0, 0
     tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN
+    
+    #TODO: Profile memory
+    #TODO: hanging
+    
     while trained_tokens < MAX_TOKENS:
         optimizer.zero_grad()
-        loss = pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device) #loss = pipeline_parallel_afab(model, data_loader, tensor_shapes, device)
+        loss = pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device)
         optimizer.step()
         trained_tokens += tokens_per_step
         step += 1
-        if pc.parallel_context.pp_is_last_stage:
-            print(f"Step: {step}, Loss: {loss:.4f}, Tokens: {trained_tokens}/{MAX_TOKENS}")
+        if pc.parallel_context.pp_is_last_stage and pc.parallel_context.global_rank == pc.parallel_context.dp_first_rank:
+            print(f"[rank {pc.parallel_context.global_rank}] Step: {step}, Loss: {loss:.4f}, Tokens: {trained_tokens}/{MAX_TOKENS}")

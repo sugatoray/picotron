@@ -2,6 +2,15 @@ from transformers import AutoConfig, AutoModelForCausalLM
 import parallel_context as pc
 from distributed_primtives import communicate, bidirectional_communicate
 import torch, torch.nn as nn, torch.nn.functional as F
+import torch.distributed as dist
+
+def reduce_loss_across_dp_ranks(loss, device):
+    # Reduce the loss across DP workers.
+    reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
+    dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=pc.parallel_context.dp_group)
+    # Average the loss across DP workers.
+    reduced_loss /= pc.parallel_context.world_size
+    return reduced_loss.item()
 
 class PipelineParallel(nn.Module):
     def __init__(self, model_name):
@@ -36,7 +45,8 @@ class PipelineParallel(nn.Module):
         return input_tensor.grad if input_tensor is not None else None
 
 def pipeline_parallel_afab(model, data_loader, tensor_shapes, device):
-    logging_loss, input_tensors, output_tensors = 0.0, [], []
+    logging_loss: torch.float32 = 0.0
+    input_tensors, output_tensors = [], []
     
     for _ in range(data_loader.num_local_micro_batches): # All forward passes
         input_tensor = communicate(operation='recv_forward', shapes=tensor_shapes, dtype=torch.float32)
@@ -44,18 +54,22 @@ def pipeline_parallel_afab(model, data_loader, tensor_shapes, device):
         batch["hidden_states"] = input_tensor
         output_tensor = model.forward(batch, device)
         communicate(operation='send_forward', tensor=output_tensor)
-        if pc.parallel_context.pp_is_last_stage:
+        
+        # Don't need to keep track of the loss on every rank. Just choosing a single rank (TP rank 0 in the last PP stage) is enough
+        if pc.parallel_context.pp_is_last_stage and pc.parallel_context.global_rank == pc.parallel_context.tp_first_rank:
             output_tensor = F.cross_entropy(output_tensor.transpose(1, 2), batch["target_ids"].to(device), reduction='mean')
             logging_loss += output_tensor.item()
+
         input_tensors.append(input_tensor)
         output_tensors.append(output_tensor)
-    
+
     for _ in range(data_loader.num_local_micro_batches): # All backward passes
         output_tensor_grad = communicate(operation='recv_backward', shapes=tensor_shapes, dtype=torch.float32)
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         communicate(operation='send_backward', tensor=input_tensor_grad)
-    
+
+    logging_loss = reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss
 
 def pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device):
@@ -67,7 +81,8 @@ def pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device):
         batch = next(iter(data_loader))
         batch["hidden_states"] = input_tensor
         output_tensor = model.forward(batch, device)
-        if pc.parallel_context.pp_is_last_stage:
+        # Don't need to keep track of the loss on every rank. Just choosing a single rank (TP rank 0 in the last PP stage) is enough
+        if pc.parallel_context.pp_is_last_stage and pc.parallel_context.global_rank == pc.parallel_context.tp_first_rank:
             output_tensor = F.cross_entropy(output_tensor.transpose(1, 2), batch["target_ids"].to(device), reduction='mean')
             nonlocal logging_loss
             logging_loss += output_tensor.item()
@@ -101,4 +116,7 @@ def pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device):
         output_tensor_grad = communicate(operation='recv_backward', shapes=tensor_shapes, dtype=torch.float32)
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         communicate(operation='send_backward', tensor=input_tensor_grad)
+        
+
+    logging_loss = reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss
