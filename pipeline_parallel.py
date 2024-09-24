@@ -7,9 +7,7 @@ import torch.distributed as dist
 def reduce_loss_across_dp_ranks(loss, device):
     # Reduce the loss across DP workers.
     reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
-    dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=pc.parallel_context.dp_group)
-    # Average the loss across DP workers.
-    reduced_loss /= pc.parallel_context.world_size
+    dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pc.parallel_context.dp_group)
     return reduced_loss.item()
 
 class PipelineParallel(nn.Module):
@@ -116,7 +114,6 @@ def pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device):
         output_tensor_grad = communicate(operation='recv_backward', shapes=tensor_shapes, dtype=torch.float32)
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         communicate(operation='send_backward', tensor=input_tensor_grad)
-        
 
     logging_loss = reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss

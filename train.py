@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 import argparse
 
 import parallel_context as pc
-from utils import set_all_seed
+from utils import set_all_seed, display_parallelism_grid
 from parallel_context import setup_parallel_context
 from pipeline_parallel import pipeline_parallel_1f1b, pipeline_parallel_afab, PipelineParallel
 
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     setup_parallel_context(tp_size=args.tp_size, pp_size=args.pp_size, dp_size=args.dp_size)
 
     if pc.parallel_context.global_rank == local_rank:
-        pc.parallel_context.display_parallelism_grid()
+        display_parallelism_grid()
 
     set_all_seed(seed=42)
     model = PipelineParallel("HuggingFaceTB/SmolLM-360M-Instruct").to(device)
@@ -61,14 +61,15 @@ if __name__ == "__main__":
     trained_tokens, step = 0, 0
     tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN
     
-    #TODO: Profile memory
-    #TODO: hanging
-    
     while trained_tokens < MAX_TOKENS:
         optimizer.zero_grad()
-        loss = pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device)
+        loss = pipeline_parallel_afab(model, data_loader, tensor_shapes, device)
         optimizer.step()
         trained_tokens += tokens_per_step
         step += 1
-        if pc.parallel_context.pp_is_last_stage and pc.parallel_context.global_rank == pc.parallel_context.dp_first_rank:
+        
+        #NOTE(fmom): change later to log on rank 0 (g00) everytime ?
+        if pc.parallel_context.pp_is_last_stage and pc.parallel_context.global_rank == pc.parallel_context.tp_first_rank and pc.parallel_context.global_rank == pc.parallel_context.dp_first_rank:
             print(f"[rank {pc.parallel_context.global_rank}] Step: {step}, Loss: {loss:.4f}, Tokens: {trained_tokens}/{MAX_TOKENS}")
+            
+    dist.destroy_process_group()
