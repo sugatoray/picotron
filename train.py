@@ -106,8 +106,7 @@ if __name__ == "__main__":
         trained_tokens += tokens_per_step
         step += 1
         
-        #NOTE(fmom): change later to log on rank 0 (g00) everytime ?
-        if pgm.process_group_manager.pp_is_last_stage and pgm.process_group_manager.global_rank == pgm.process_group_manager.tp_first_rank and pgm.process_group_manager.global_rank == pgm.process_group_manager.dp_first_rank:
+        if pgm.process_group_manager.global_rank == 0:
             print(f"[rank {pgm.process_group_manager.global_rank}] Step: {step}, Loss: {loss:.4f}, Tokens: {trained_tokens}/{MAX_TOKENS}")
             
     dist.destroy_process_group()

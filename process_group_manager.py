@@ -21,6 +21,7 @@ class ProcessGroupManager:
         self.dp_group = dist.new_subgroups_by_enumeration([self.grid[i, j, :].tolist() for i in range(tp_size) for j in range(pp_size)])[0]
         self.tp_group = dist.new_subgroups_by_enumeration([self.grid[:, i, j].tolist() for i in range(pp_size) for j in range(dp_size)])[0]
         self.pp_group = dist.new_subgroups_by_enumeration([self.grid[i, :, j].tolist() for i in range(tp_size) for j in range(dp_size)])[0]
+        self.world_group = dist.group.WORLD
        
         self.tp_group_ids = self.grid[:, self.pp_rank, self.dp_rank].tolist()
         self.pp_group_ids = self.grid[self.tp_rank, :, self.dp_rank].tolist()

@@ -4,9 +4,10 @@ import torch, torch.nn as nn, torch.nn.functional as F
 import torch.distributed as dist
 
 def reduce_loss_across_dp_ranks(loss, device):
-    # Reduce the loss across DP workers.
     reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
-    dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pgm.process_group_manager.dp_group)
+    # Reduce the loss across all workers so that every rank has the updated loss value.
+    dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.world_group)
+    reduced_loss /= pgm.process_group_manager.dp_world_size
     return reduced_loss.item()
 
 class PipelineParallel(nn.Module):
