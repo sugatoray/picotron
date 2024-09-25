@@ -4,21 +4,22 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader, DistributedSampler
 from datasets import load_dataset
 
-import parallel_context as pc
+import process_group_manager as pgm
 
 class MicroBatchDataLoader(DataLoader):
     def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, split="train", num_samples=None):
         self.global_batch_size, self.micro_batch_size, self.seq_length = global_batch_size, micro_batch_size, seq_length
-        self.local_batch_size = self.global_batch_size // pc.parallel_context.dp_world_size
+        self.local_batch_size = self.global_batch_size // pgm.process_group_manager.dp_world_size
         self.num_local_micro_batches = self.local_batch_size // self.micro_batch_size
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
+        
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.dataset = load_dataset(dataset_name, split=split)
         if num_samples: self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
         dist.barrier()
         self.dataset = self.dataset.map(lambda examples: self.tokenizer(examples["text"], padding="max_length", truncation=True, max_length=self.seq_length + 1, return_special_tokens_mask=False), batched=True, remove_columns=self.dataset.column_names).with_format("torch", columns=["input_ids"])
         
-        self.sampler = DistributedSampler(self.dataset, num_replicas=pc.parallel_context.dp_world_size, rank=pc.parallel_context.dp_rank, shuffle=False)
+        self.sampler = DistributedSampler(self.dataset, num_replicas=pgm.process_group_manager.dp_world_size, rank=pgm.process_group_manager.dp_rank, shuffle=False)
         
         super().__init__(self.dataset, batch_size=micro_batch_size, collate_fn=self.collate_batch, pin_memory=True, num_workers=3, sampler=self.sampler, shuffle=False)
 

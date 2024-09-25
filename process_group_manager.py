@@ -2,7 +2,7 @@ import os
 import torch
 import torch.distributed as dist
 
-class ParallelContext:
+class ProcessGroupManager:
     def __init__(self, tp_size, pp_size, dp_size):
         self.global_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
@@ -48,6 +48,6 @@ class ParallelContext:
     def __str__(self):
         return f"DP({self.dp_size})-PP({self.pp_size})-TP({self.tp_size})-Rank({self.global_rank})"
 
-def setup_parallel_context(tp_size, pp_size, dp_size):
-    global parallel_context
-    parallel_context = ParallelContext(tp_size, pp_size, dp_size)
+def setup_process_group_manager(tp_size, pp_size, dp_size):
+    global process_group_manager
+    process_group_manager = ProcessGroupManager(tp_size, pp_size, dp_size)

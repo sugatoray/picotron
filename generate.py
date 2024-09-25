@@ -5,13 +5,13 @@ import torch, torch.distributed as dist
 from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM,AutoTokenizer
 
 from utils import set_all_seed
-import parallel_context as pc
-from parallel_context import setup_parallel_context
+import process_group_manager as pgm
+from process_group_manager import setup_process_group_manager
 from pipeline_parallel import PipelineParallel
 from distributed_primtives import communicate
 
 def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
-    if pc.parallel_context.pp_world_size == 1:
+    if pgm.process_group_manager.pp_world_size == 1:
         return model.forward(batch, device) 
     
     batch_size = batch["input_ids"].shape[0]
@@ -20,12 +20,12 @@ def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
 
     # Preallocate memory for output logits.
     logits = None
-    if pc.parallel_context.pp_is_last_stage:
+    if pgm.process_group_manager.pp_is_last_stage:
         logits = torch.empty((batch_size, seq_len, int(config.vocab_size)), dtype=torch.float32, device=device)
 
     recv_buffer = communicate(operation="recv_forward", shapes=tensor_shapes, dtype=torch.float32)
     
-    batch["hidden_states"] = None if pc.parallel_context.pp_is_first_stage else recv_buffer
+    batch["hidden_states"] = None if pgm.process_group_manager.pp_is_first_stage else recv_buffer
 
     output_tensor = model.forward(batch, device)
     
@@ -33,7 +33,7 @@ def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
     communicate(operation="send_forward", tensor=output_tensor)
 
     # Copy logits.
-    if pc.parallel_context.pp_is_last_stage:
+    if pgm.process_group_manager.pp_is_last_stage:
         logits = output_tensor
 
     dist.barrier()
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    setup_parallel_context(tp_size=1, pp_size=args.pp_size, dp_size=1)
+    setup_process_group_manager(tp_size=1, pp_size=args.pp_size, dp_size=1)
     set_all_seed(seed=42)
     model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
     config = AutoConfig.from_pretrained(model_name)
@@ -92,7 +92,7 @@ if __name__ == "__main__":
         logits = run_one_inference_step(model, batch_prompts, device, config)
 
         # Sample new token
-        if pc.parallel_context.pp_is_last_stage:
+        if pgm.process_group_manager.pp_is_last_stage:
             assert logits is not None    
             next_token = torch.argmax(logits[:, -1], dim=-1)
             tokenized_prompts["input_ids"] = torch.cat([tokenized_prompts["input_ids"], next_token.unsqueeze(-1)], dim=-1)
@@ -101,11 +101,11 @@ if __name__ == "__main__":
             tokenized_prompts["input_ids"] = torch.zeros((tokenized_prompts["input_ids"].shape[0], tokenized_prompts["input_ids"].shape[1] + 1), dtype=torch.int64, device=device)
             tokenized_prompts["attention_mask"] = torch.zeros((tokenized_prompts["attention_mask"].shape[0], tokenized_prompts["attention_mask"].shape[1] + 1), dtype=torch.int64, device=device)
     
-        dist.broadcast(tokenized_prompts["input_ids"], src=pc.parallel_context.pp_last_rank)
-        dist.broadcast(tokenized_prompts["attention_mask"], src=pc.parallel_context.pp_last_rank)
+        dist.broadcast(tokenized_prompts["input_ids"], src=pgm.process_group_manager.pp_last_rank)
+        dist.broadcast(tokenized_prompts["attention_mask"], src=pgm.process_group_manager.pp_last_rank)
    
     # Get only the new generated tokens
-    if pc.parallel_context.pp_is_last_stage:    
+    if pgm.process_group_manager.pp_is_last_stage:    
         for i, prompt in enumerate(prompts):
             tokenized_outputs = tokenized_prompts["input_ids"][i, tokenized_prompts["input_ids"].shape[1] - args.max_tokens:]
             outputs = tokenizer.decode(tokenized_outputs)

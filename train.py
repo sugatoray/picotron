@@ -7,9 +7,9 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 import argparse
 
-import parallel_context as pc
+import process_group_manager as pgm
 from utils import set_all_seed, display_parallelism_grid
-from parallel_context import setup_parallel_context
+from process_group_manager import setup_process_group_manager
 from pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from data_parallel import DataParallel
 from dataset import MicroBatchDataLoader
@@ -55,9 +55,9 @@ if __name__ == "__main__":
     dist.init_process_group(rank=local_rank, world_size=world_size, backend="nccl", init_method=f"tcp://{host}:{port}")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    setup_parallel_context(tp_size=args.tp_size, pp_size=args.pp_size, dp_size=args.dp_size)
+    setup_process_group_manager(tp_size=args.tp_size, pp_size=args.pp_size, dp_size=args.dp_size)
 
-    if pc.parallel_context.global_rank == local_rank:
+    if pgm.process_group_manager.global_rank == local_rank:
         display_parallelism_grid()
 
     set_all_seed(seed=42)
@@ -65,10 +65,10 @@ if __name__ == "__main__":
     config = AutoConfig.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name, config=config).to(device)
 
-    if pc.parallel_context.pp_world_size > 1:
+    if pgm.process_group_manager.pp_world_size > 1:
         model = PipelineParallel(model, config).to(device)
     
-    if pc.parallel_context.dp_world_size > 1:
+    if pgm.process_group_manager.dp_world_size > 1:
         model = DataParallel(model, config).to(device)
 
     model.train()
@@ -81,8 +81,10 @@ if __name__ == "__main__":
     tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN
 
     dist.barrier()
-
+    
     #TODO: find a way to setup reference model training
+    #TODO: Add Context Parallelism
+    #TODO: Double-check consumed tokens after each steps (for example, MICRO_BATCH_SIZE=2 and using only dp_size=4, num_local_micro_batches=0 => division by 0)
     #TODO: Add activation checkpointing
     #TODO: add gradient accumulation
     
@@ -91,12 +93,12 @@ if __name__ == "__main__":
 
         optimizer.zero_grad()
         
-        if pc.parallel_context.pp_world_size > 1:
+        if pgm.process_group_manager.pp_world_size > 1:
             loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device)
         else:
             loss = train_step(model, data_loader, device)
 
-        if pc.parallel_context.dp_world_size > 1:
+        if pgm.process_group_manager.dp_world_size > 1:
             # Average gradient across DP ranks
             model.all_reduce_gradients()
 
@@ -105,7 +107,7 @@ if __name__ == "__main__":
         step += 1
         
         #NOTE(fmom): change later to log on rank 0 (g00) everytime ?
-        if pc.parallel_context.pp_is_last_stage and pc.parallel_context.global_rank == pc.parallel_context.tp_first_rank and pc.parallel_context.global_rank == pc.parallel_context.dp_first_rank:
-            print(f"[rank {pc.parallel_context.global_rank}] Step: {step}, Loss: {loss:.4f}, Tokens: {trained_tokens}/{MAX_TOKENS}")
+        if pgm.process_group_manager.pp_is_last_stage and pgm.process_group_manager.global_rank == pgm.process_group_manager.tp_first_rank and pgm.process_group_manager.global_rank == pgm.process_group_manager.dp_first_rank:
+            print(f"[rank {pgm.process_group_manager.global_rank}] Step: {step}, Loss: {loss:.4f}, Tokens: {trained_tokens}/{MAX_TOKENS}")
             
     dist.destroy_process_group()

@@ -1,4 +1,4 @@
-import parallel_context as pc
+import process_group_manager as pgm
 from distributed_primtives import communicate, bidirectional_communicate
 import torch, torch.nn as nn, torch.nn.functional as F
 import torch.distributed as dist
@@ -6,22 +6,22 @@ import torch.distributed as dist
 def reduce_loss_across_dp_ranks(loss, device):
     # Reduce the loss across DP workers.
     reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
-    dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pc.parallel_context.dp_group)
+    dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pgm.process_group_manager.dp_group)
     return reduced_loss.item()
 
 class PipelineParallel(nn.Module):
     def __init__(self, model, config):
         super().__init__()
         layer_distribution = self.distribute_layers(config.num_hidden_layers)
-        self.embed_tokens = model.model.embed_tokens if pc.parallel_context.pp_is_first_stage else nn.Identity()
+        self.embed_tokens = model.model.embed_tokens if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
         self.decoder_layers = nn.ModuleDict({str(i): model.model.layers[i] for i in layer_distribution})
-        self.norm = model.model.norm if pc.parallel_context.pp_is_last_stage else nn.Identity()
-        self.lm_head = model.lm_head if pc.parallel_context.pp_is_last_stage else nn.Identity()
+        self.norm = model.model.norm if pgm.process_group_manager.pp_is_last_stage else nn.Identity()
+        self.lm_head = model.lm_head if pgm.process_group_manager.pp_is_last_stage else nn.Identity()
 
     def distribute_layers(self, num_layers):
-        layers_per_gpu = [num_layers // pc.parallel_context.pp_world_size + (1 if i < num_layers % pc.parallel_context.pp_world_size else 0) for i in range(pc.parallel_context.pp_world_size)]
-        start_layer = sum(layers_per_gpu[:pc.parallel_context.pp_rank])
-        return list(range(start_layer, start_layer + layers_per_gpu[pc.parallel_context.pp_rank]))
+        layers_per_gpu = [num_layers // pgm.process_group_manager.pp_world_size + (1 if i < num_layers % pgm.process_group_manager.pp_world_size else 0) for i in range(pgm.process_group_manager.pp_world_size)]
+        start_layer = sum(layers_per_gpu[:pgm.process_group_manager.pp_rank])
+        return list(range(start_layer, start_layer + layers_per_gpu[pgm.process_group_manager.pp_rank]))
 
     def forward(self, batch, device):
         x = batch["hidden_states"].to(device) if batch["hidden_states"] is not None else batch["input_ids"].to(device)
@@ -50,7 +50,7 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device):
         communicate(operation='send_forward', tensor=output_tensor)
         
         # Don't need to keep track of the loss on every rank. Just choosing a single rank (TP rank 0 in the last PP stage) is enough
-        if pc.parallel_context.pp_is_last_stage and pc.parallel_context.global_rank == pc.parallel_context.tp_first_rank:
+        if pgm.process_group_manager.pp_is_last_stage and pgm.process_group_manager.global_rank == pgm.process_group_manager.tp_first_rank:
             output_tensor = F.cross_entropy(output_tensor.transpose(1, 2), batch["target_ids"].to(device), reduction='mean')
             logging_loss += output_tensor.item()
 
@@ -67,7 +67,7 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device):
     return logging_loss
 
 def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device):
-    num_warmup_microbatches = min(pc.parallel_context.pp_world_size - pc.parallel_context.pp_rank - 1, data_loader.num_local_micro_batches)
+    num_warmup_microbatches = min(pgm.process_group_manager.pp_world_size - pgm.process_group_manager.pp_rank - 1, data_loader.num_local_micro_batches)
     num_microbatches_remaining = data_loader.num_local_micro_batches - num_warmup_microbatches
     logging_loss, input_tensors, output_tensors  = 0.0, [], []
     
@@ -76,7 +76,7 @@ def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device):
         batch["hidden_states"] = input_tensor
         output_tensor = model.forward(batch, device)
         # Don't need to keep track of the loss on every rank. Just choosing a single rank (TP rank 0 in the last PP stage) is enough
-        if pc.parallel_context.pp_is_last_stage and pc.parallel_context.global_rank == pc.parallel_context.tp_first_rank:
+        if pgm.process_group_manager.pp_is_last_stage and pgm.process_group_manager.global_rank == pgm.process_group_manager.tp_first_rank:
             output_tensor = F.cross_entropy(output_tensor.transpose(1, 2), batch["target_ids"].to(device), reduction='mean')
             nonlocal logging_loss
             logging_loss += output_tensor.item()
