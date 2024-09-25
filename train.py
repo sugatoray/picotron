@@ -4,18 +4,20 @@ import torch, torch.distributed as dist
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, DistributedSampler
 from datasets import load_dataset
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM,AutoTokenizer
+
 import argparse
 
 import parallel_context as pc
 from utils import set_all_seed, display_parallelism_grid
 from parallel_context import setup_parallel_context
 from pipeline_parallel import pipeline_parallel_1f1b, pipeline_parallel_afab, PipelineParallel
+from data_parallel import DataParallel
 
 class MicroBatchDataLoader(DataLoader):
-    def __init__(self, global_batch_size, micro_batch_size, data_parallel_size, seq_length, dataset_name, tokenizer_name, split="train", num_samples=None):
-        self.global_batch_size, self.micro_batch_size, self.data_parallel_size, self.seq_length = global_batch_size, micro_batch_size, data_parallel_size, seq_length
-        self.local_batch_size = self.global_batch_size // self.data_parallel_size
+    def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, split="train", num_samples=None):
+        self.global_batch_size, self.micro_batch_size, self.seq_length = global_batch_size, micro_batch_size, seq_length
+        self.local_batch_size = self.global_batch_size // pc.parallel_context.dp_world_size
         self.num_local_micro_batches = self.local_batch_size // self.micro_batch_size
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -23,7 +25,13 @@ class MicroBatchDataLoader(DataLoader):
         if num_samples: self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
         dist.barrier()
         self.dataset = self.dataset.map(lambda examples: self.tokenizer(examples["text"], padding="max_length", truncation=True, max_length=self.seq_length + 1, return_special_tokens_mask=False), batched=True, remove_columns=self.dataset.column_names).with_format("torch", columns=["input_ids"])
-        super().__init__(self.dataset, batch_size=micro_batch_size, collate_fn=self.collate_batch, pin_memory=True, num_workers=3, sampler=DistributedSampler(self.dataset, num_replicas=data_parallel_size, rank=0, shuffle=False), shuffle=False)
+        
+        self.sampler = DistributedSampler(self.dataset, num_replicas=pc.parallel_context.dp_world_size, rank=pc.parallel_context.dp_rank, shuffle=False)
+        
+        super().__init__(self.dataset, batch_size=micro_batch_size, collate_fn=self.collate_batch, pin_memory=True, num_workers=3, sampler=self.sampler, shuffle=False)
+
+    def set_epoch(self, epoch):
+        self.sampler.set_epoch(epoch)
 
     def collate_batch(self, batch_data):
         batch_input_ids = torch.stack([item['input_ids'] for item in batch_data])
@@ -54,14 +62,27 @@ if __name__ == "__main__":
         display_parallelism_grid()
 
     set_all_seed(seed=42)
-    model = PipelineParallel("HuggingFaceTB/SmolLM-360M-Instruct").to(device)
-    data_loader = MicroBatchDataLoader(GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, 1, SEQ_LEN, "roneneldan/TinyStories", "HuggingFaceTB/SmolLM-360M-Instruct", num_samples=NUM_SAMPLES)
-    tensor_shapes = (SEQ_LEN, data_loader.micro_batch_size, model.config.hidden_size)
+    model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
+    config = AutoConfig.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
+
+    model = PipelineParallel(model, config).to(device)
+    model = DataParallel(model).to(device)
+
+    model.train()
+    
+    data_loader = MicroBatchDataLoader(GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, SEQ_LEN, "roneneldan/TinyStories", model_name, num_samples=NUM_SAMPLES)
+    tensor_shapes = (SEQ_LEN, data_loader.micro_batch_size, config.hidden_size)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
+    
     trained_tokens, step = 0, 0
     tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN
+
+    dist.barrier()
     
-    while trained_tokens < MAX_TOKENS:
+    while trained_tokens < MAX_TOKENS:        
+        data_loader.set_epoch(step)
+
         optimizer.zero_grad()
         loss = pipeline_parallel_afab(model, data_loader, tensor_shapes, device)
         optimizer.step()

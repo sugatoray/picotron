@@ -2,7 +2,7 @@
 import os
 import argparse
 import torch, torch.distributed as dist
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM,AutoTokenizer
 
 from utils import set_all_seed
 import parallel_context as pc
@@ -10,18 +10,18 @@ from parallel_context import setup_parallel_context
 from pipeline_parallel import PipelineParallel
 from distributed_primtives import communicate
 
-def run_one_inference_step(model, batch, device) -> torch.Tensor:
+def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
     if pc.parallel_context.pp_world_size == 1:
         return model.forward(batch, device) 
     
     batch_size = batch["input_ids"].shape[0]
     seq_len = batch["input_ids"].shape[1]
-    tensor_shapes = (batch_size, seq_len, model.config.hidden_size)
+    tensor_shapes = (batch_size, seq_len, config.hidden_size)
 
     # Preallocate memory for output logits.
     logits = None
     if pc.parallel_context.pp_is_last_stage:
-        logits = torch.empty((batch_size, seq_len, int(model.config.vocab_size)), dtype=torch.float32, device=device)
+        logits = torch.empty((batch_size, seq_len, int(config.vocab_size)), dtype=torch.float32, device=device)
 
     recv_buffer = communicate(operation="recv_forward", shapes=tensor_shapes, dtype=torch.float32)
     
@@ -53,18 +53,22 @@ if __name__ == "__main__":
     device = torch.device("cuda", local_rank)
     setup_parallel_context(tp_size=1, pp_size=args.pp_size, dp_size=1)
     set_all_seed(seed=42)
-    model = PipelineParallel("HuggingFaceTB/SmolLM-360M-Instruct").to(device)
-
+    model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
+    config = AutoConfig.from_pretrained(model_name)
+    base_model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
+    model = PipelineParallel(base_model, config).to(device)
+    del base_model
+    
     model.eval()
     
     # Tokenize the input
     prompts = [
         "My name is",
-        # "How old are you ?",
-        # "What is your favorite color?",
+        "How old are you ?",
+        "What is your favorite color?",
     ]
     
-    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM-360M-Instruct")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     
@@ -85,7 +89,7 @@ if __name__ == "__main__":
             "hidden_states": None,
         }
         
-        logits = run_one_inference_step(model, batch_prompts, device)
+        logits = run_one_inference_step(model, batch_prompts, device, config)
 
         # Sample new token
         if pc.parallel_context.pp_is_last_stage:

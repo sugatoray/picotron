@@ -1,4 +1,3 @@
-from transformers import AutoConfig, AutoModelForCausalLM
 import parallel_context as pc
 from distributed_primtives import communicate, bidirectional_communicate
 import torch, torch.nn as nn, torch.nn.functional as F
@@ -11,16 +10,13 @@ def reduce_loss_across_dp_ranks(loss, device):
     return reduced_loss.item()
 
 class PipelineParallel(nn.Module):
-    def __init__(self, model_name):
+    def __init__(self, model, config):
         super().__init__()
-        self.config = AutoConfig.from_pretrained(model_name)
-        base_model = AutoModelForCausalLM.from_pretrained(model_name, config=self.config)
-        layer_distribution = self.distribute_layers(self.config.num_hidden_layers)
-        self.embed_tokens = base_model.model.embed_tokens if pc.parallel_context.pp_is_first_stage else nn.Identity()
-        self.decoder_layers = nn.ModuleDict({str(i): base_model.model.layers[i] for i in layer_distribution})
-        self.norm = base_model.model.norm if pc.parallel_context.pp_is_last_stage else nn.Identity()
-        self.lm_head = base_model.lm_head if pc.parallel_context.pp_is_last_stage else nn.Identity()
-        del base_model
+        layer_distribution = self.distribute_layers(config.num_hidden_layers)
+        self.embed_tokens = model.model.embed_tokens if pc.parallel_context.pp_is_first_stage else nn.Identity()
+        self.decoder_layers = nn.ModuleDict({str(i): model.model.layers[i] for i in layer_distribution})
+        self.norm = model.model.norm if pc.parallel_context.pp_is_last_stage else nn.Identity()
+        self.lm_head = model.lm_head if pc.parallel_context.pp_is_last_stage else nn.Identity()
 
     def distribute_layers(self, num_layers):
         layers_per_gpu = [num_layers // pc.parallel_context.pp_world_size + (1 if i < num_layers % pc.parallel_context.pp_world_size else 0) for i in range(pc.parallel_context.pp_world_size)]
@@ -66,6 +62,9 @@ def pipeline_parallel_afab(model, data_loader, tensor_shapes, device):
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         communicate(operation='send_backward', tensor=input_tensor_grad)
+
+    # Average gradient across DP ranks
+    model.all_reduce_gradients()
 
     logging_loss = reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss
@@ -114,6 +113,9 @@ def pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device):
         output_tensor_grad = communicate(operation='recv_backward', shapes=tensor_shapes, dtype=torch.float32)
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         communicate(operation='send_backward', tensor=input_tensor_grad)
+
+    # Average gradient across DP ranks
+    model.all_reduce_gradients()
 
     logging_loss = reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss
