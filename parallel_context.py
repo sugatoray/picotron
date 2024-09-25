@@ -13,7 +13,7 @@ class ParallelContext:
         self.dp_size = dp_size
         assert self.world_size == self.tp_size * self.pp_size * self.dp_size, f"World size ({self.world_size}) != TP ({self.tp_size}) * PP ({self.pp_size}) * DP ({self.dp_size})"
 
-        self.grid = torch.arange(self.world_size).view(self.tp_size, self.pp_size, self.dp_size,) # TP * PP * DP grid
+        self.grid = torch.arange(self.world_size).view(self.tp_size, self.pp_size, self.dp_size) # TP * PP * DP grid
         # Find the position of the current process in the grid
         self.tp_rank, self.pp_rank, self.dp_rank = (self.grid == self.global_rank).nonzero().flatten().tolist()
 

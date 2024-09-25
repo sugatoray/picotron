@@ -3,7 +3,7 @@ import torch.nn as nn
 import parallel_context as pc
 
 class DataParallel(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, config):
         #TODO: Add Zero1
         #TODO: Interleave all_reduce
         super().__init__()

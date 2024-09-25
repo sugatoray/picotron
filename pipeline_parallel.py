@@ -38,7 +38,7 @@ class PipelineParallel(nn.Module):
         torch.autograd.backward(output_tensor, grad_tensors=output_tensor_grad, retain_graph=False, create_graph=False)
         return input_tensor.grad if input_tensor is not None else None
 
-def pipeline_parallel_afab(model, data_loader, tensor_shapes, device):
+def train_step_pipeline_afab(model, data_loader, tensor_shapes, device):
     logging_loss: torch.float32 = 0.0
     input_tensors, output_tensors = [], []
     
@@ -63,13 +63,10 @@ def pipeline_parallel_afab(model, data_loader, tensor_shapes, device):
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         communicate(operation='send_backward', tensor=input_tensor_grad)
 
-    # Average gradient across DP ranks
-    model.all_reduce_gradients()
-
     logging_loss = reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss
 
-def pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device):
+def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device):
     num_warmup_microbatches = min(pc.parallel_context.pp_world_size - pc.parallel_context.pp_rank - 1, data_loader.num_local_micro_batches)
     num_microbatches_remaining = data_loader.num_local_micro_batches - num_warmup_microbatches
     logging_loss, input_tensors, output_tensors  = 0.0, [], []
@@ -113,9 +110,6 @@ def pipeline_parallel_1f1b(model, data_loader, tensor_shapes, device):
         output_tensor_grad = communicate(operation='recv_backward', shapes=tensor_shapes, dtype=torch.float32)
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         communicate(operation='send_backward', tensor=input_tensor_grad)
-
-    # Average gradient across DP ranks
-    model.all_reduce_gradients()
 
     logging_loss = reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss
