@@ -12,9 +12,9 @@ from utils import set_all_seed, display_parallelism_grid, print
 from process_group_manager import setup_process_group_manager
 from pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from data_parallel import DataParallel
+from context_parallel import ContextParallel
 from dataset import MicroBatchDataLoader
 import wandb
-
 
 def train_step(model, data_loader, device):
     total_loss = 0.0
@@ -40,9 +40,9 @@ def train_step(model, data_loader, device):
     return avg_loss
 
 if __name__ == "__main__":
-    
     parser = argparse.ArgumentParser()
     parser.add_argument("--tp_size", type=int, default=1)
+    parser.add_argument("--cp_size", type=int, default=1)
     parser.add_argument("--pp_size", type=int, default=1)
     parser.add_argument("--dp_size", type=int, default=1)
     parser.add_argument("--use_wandb", action="store_true", default=False)
@@ -73,9 +73,9 @@ if __name__ == "__main__":
     
     dist.init_process_group(rank=local_rank, world_size=world_size, backend=backend, init_method=f"tcp://{host}:{port}")
     
-    setup_process_group_manager(tp_size=args.tp_size, pp_size=args.pp_size, dp_size=args.dp_size)
+    setup_process_group_manager(tp_size=args.tp_size, cp_size=args.cp_size, pp_size=args.pp_size, dp_size=args.dp_size)
 
-    if pgm.process_group_manager.global_rank == local_rank:
+    if pgm.process_group_manager.global_rank == 0:
         display_parallelism_grid()
 
     set_all_seed(SEED)
@@ -103,6 +103,9 @@ if __name__ == "__main__":
     
     model = AutoModelForCausalLM.from_pretrained(model_name, config=config).to(device)
 
+    if pgm.process_group_manager.cp_size > 1:
+        model = ContextParallel(model, config).to(device)
+
     if pgm.process_group_manager.pp_world_size > 1:
         model = PipelineParallel(model, config).to(device)
     
@@ -122,6 +125,8 @@ if __name__ == "__main__":
     
     #TODO: Add Context Parallelism
     #TODO: Double-check consumed tokens after each steps (for example, MICRO_BATCH_SIZE=2 and using only dp_size=4, num_local_micro_batches=0 => division by 0)
+    #TODO: Check convergence
+    #TODO: Try multi-nodes
     #TODO: Add activation checkpointing
     #TODO: add gradient accumulation
     
