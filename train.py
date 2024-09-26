@@ -8,7 +8,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 import argparse
 
 import process_group_manager as pgm
-from utils import set_all_seed, display_parallelism_grid
+from utils import set_all_seed, display_parallelism_grid, print
 from process_group_manager import setup_process_group_manager
 from pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from data_parallel import DataParallel
@@ -46,18 +46,33 @@ if __name__ == "__main__":
     parser.add_argument("--pp_size", type=int, default=1)
     parser.add_argument("--dp_size", type=int, default=1)
     parser.add_argument("--use_wandb", action="store_true", default=False)
+    parser.add_argument("--use_cpu", action="store_true", default=False)
+    parser.add_argument("--master_addr", type=str, default="localhost")
+    parser.add_argument("--master_port", type=int, default=29500)
     
     args = parser.parse_args()
     
+    os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    local_rank, world_size = int(os.environ["LOCAL_RANK"]), int(os.environ["WORLD_SIZE"])
-    host, port = os.environ["MASTER_ADDR"], int(os.environ["MASTER_PORT"])
-
+ 
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    host = os.environ["MASTER_ADDR"]
+    port = int(os.environ["MASTER_PORT"])
+    
     SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 10, 6, 2, 1e-4, 20, 1800, 42
-        
-    dist.init_process_group(rank=local_rank, world_size=world_size, backend="nccl", init_method=f"tcp://{host}:{port}")
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
+
+    backend = "gloo" if args.use_cpu else "nccl"
+    
+    if backend == "nccl":
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cpu")
+    
+    
+    dist.init_process_group(rank=local_rank, world_size=world_size, backend=backend, init_method=f"tcp://{host}:{port}")
+    
     setup_process_group_manager(tp_size=args.tp_size, pp_size=args.pp_size, dp_size=args.dp_size)
 
     if pgm.process_group_manager.global_rank == local_rank:
@@ -73,9 +88,9 @@ if __name__ == "__main__":
             project="picotron",
             name=f"test_convergence_{pgm.process_group_manager}",
             config={
-                "data_parallel_size": pgm.process_group_manager.dp_size,
                 "tensor_parallel_size": pgm.process_group_manager.tp_size,
                 "pipeline_parallel_size": pgm.process_group_manager.pp_size,
+                "data_parallel_size": pgm.process_group_manager.dp_size,
                 "model": model_name,
                 "dataset": dataset_name,
                 "max_tokens": MAX_TOKENS,

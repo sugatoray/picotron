@@ -44,11 +44,11 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device):
     input_tensors, output_tensors = [], []
     
     for _ in range(data_loader.num_local_micro_batches): # All forward passes
-        input_tensor = communicate(operation='recv_forward', shapes=tensor_shapes, dtype=torch.float32)
+        input_tensor = communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=torch.float32)
         batch = next(iter(data_loader))
         batch["hidden_states"] = input_tensor
         output_tensor = model.forward(batch, device)
-        communicate(operation='send_forward', tensor=output_tensor)
+        communicate(operation='send_forward', tensor=output_tensor, device=device, dtype=torch.float32)
         
         # Don't need to keep track of the loss on every rank. Just choosing a single rank (TP rank 0 in the last PP stage) is enough
         if pgm.process_group_manager.pp_is_last_stage and pgm.process_group_manager.global_rank == pgm.process_group_manager.tp_first_rank:
@@ -59,10 +59,10 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device):
         output_tensors.append(output_tensor)
 
     for _ in range(data_loader.num_local_micro_batches): # All backward passes
-        output_tensor_grad = communicate(operation='recv_backward', shapes=tensor_shapes, dtype=torch.float32)
+        output_tensor_grad = communicate(operation='recv_backward', shapes=tensor_shapes, device=device, dtype=torch.float32)
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
-        communicate(operation='send_backward', tensor=input_tensor_grad)
+        communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=torch.float32)
 
     logging_loss = reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss
@@ -84,33 +84,33 @@ def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device):
         return output_tensor
 
     for _ in range(num_warmup_microbatches): # Warmup forward passes
-        input_tensor = communicate(operation='recv_forward', shapes=tensor_shapes, dtype=torch.float32)
+        input_tensor = communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=torch.float32)
         output_tensor = _forward_step(input_tensor)
-        communicate(operation='send_forward', tensor=output_tensor)
+        communicate(operation='send_forward', tensor=output_tensor, device=device, dtype=torch.float32)
         input_tensors.append(input_tensor)
         output_tensors.append(output_tensor)
 
     if num_microbatches_remaining > 0:
-        input_tensor = communicate(operation='recv_forward', shapes=tensor_shapes, dtype=torch.float32)
+        input_tensor = communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=torch.float32)
     
     for i in range(num_microbatches_remaining):  # 1F1B steady state
         output_tensor = _forward_step(input_tensor)
-        output_tensor_grad = bidirectional_communicate(operation='send_fwd_recv_bwd', send_tensor=output_tensor, recv_shapes=tensor_shapes, dtype=torch.float32, device=device)
+        output_tensor_grad = bidirectional_communicate(operation='send_fwd_recv_bwd', send_tensor=output_tensor, recv_shapes=tensor_shapes, device=device, dtype=torch.float32)
         input_tensors.append(input_tensor)
         output_tensors.append(output_tensor)
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         if i == num_microbatches_remaining - 1: # last iteration
             input_tensor = None
-            communicate(operation='send_backward', tensor=input_tensor_grad)
+            communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=torch.float32)
         else:
-            input_tensor = bidirectional_communicate(operation='send_bwd_recv_fwd', send_tensor=input_tensor_grad, recv_shapes=tensor_shapes, dtype=torch.float32, device=device)
+            input_tensor = bidirectional_communicate(operation='send_bwd_recv_fwd', send_tensor=input_tensor_grad, recv_shapes=tensor_shapes, device=device, dtype=torch.float32)
 
     for _ in range(num_warmup_microbatches): # Cooldown backward passes
         input_tensor, output_tensor = input_tensors.pop(0), output_tensors.pop(0)
-        output_tensor_grad = communicate(operation='recv_backward', shapes=tensor_shapes, dtype=torch.float32)
+        output_tensor_grad = communicate(operation='recv_backward', shapes=tensor_shapes, device=device, dtype=torch.float32)
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
-        communicate(operation='send_backward', tensor=input_tensor_grad)
+        communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=torch.float32)
 
     logging_loss = reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss

@@ -5,19 +5,19 @@ import process_group_manager as pgm
 
 STEP, VERBOSE = 0, os.environ.get("VERBOSE", "0") == "1"
 
-def communicate(operation='send_forward', tensor=None, shapes=None, dtype=None):
+def communicate(operation, device, dtype, tensor=None, shapes=None):
     global STEP
     global VERBOSE
     if operation == 'recv_forward':
         if pgm.process_group_manager.pp_is_first_stage: return None
-        tensor = torch.empty(shapes, requires_grad=True, device='cuda', dtype=dtype)
+        tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
         src = pgm.process_group_manager.pp_prev_rank
     elif operation == 'send_forward':
         if pgm.process_group_manager.pp_is_last_stage: return
         dest = pgm.process_group_manager.pp_next_rank
     elif operation == 'recv_backward':
         if pgm.process_group_manager.pp_is_last_stage: return None
-        tensor = torch.empty(shapes, requires_grad=True, device='cuda', dtype=dtype)
+        tensor = torch.empty(shapes, requires_grad=True, device=device, dtype=dtype)
         src = pgm.process_group_manager.pp_next_rank
     elif operation == 'send_backward':
         if pgm.process_group_manager.pp_is_first_stage: return
@@ -31,7 +31,7 @@ def communicate(operation='send_forward', tensor=None, shapes=None, dtype=None):
     if VERBOSE: STEP += 1
     return tensor if not is_send else None
 
-def bidirectional_communicate(operation, send_tensor, recv_shapes, dtype, device):
+def bidirectional_communicate(operation, send_tensor, recv_shapes, device, dtype):
     global STEP
     global VERBOSE
     is_fwd = (operation == 'send_fwd_recv_bwd')

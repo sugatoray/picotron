@@ -1,5 +1,18 @@
-import torch, random, numpy as np
+import torch
+import random
+import numpy as np
+import builtins
+import fcntl
 import process_group_manager as pgm
+
+def print(*args, **kwargs):
+    """ solves multi-process interleaved print problem """
+    with open(__file__, "r") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            builtins.print(*args, **kwargs)
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 def set_all_seed(seed):
     for module in [random, np.random]: module.seed(seed)
@@ -50,8 +63,8 @@ def display_parallelism_grid():
 
     output.append(f"=== Local Parallelism Configuration ===")
     output.append(pgm.process_group_manager.__str__())            
-    output.append(f"DP Group IDs: {['g{:02d}'.format(id) for id in pgm.process_group_manager.dp_group_ids]}")
-    output.append(f"PP Group IDs: {['g{:02d}'.format(id) for id in pgm.process_group_manager.pp_group_ids]}")
     output.append(f"TP Group IDs: {['g{:02d}'.format(id) for id in pgm.process_group_manager.tp_group_ids]}")
+    output.append(f"PP Group IDs: {['g{:02d}'.format(id) for id in pgm.process_group_manager.pp_group_ids]}")
+    output.append(f"DP Group IDs: {['g{:02d}'.format(id) for id in pgm.process_group_manager.dp_group_ids]}")
 
     print("\n".join(output))
