@@ -39,6 +39,13 @@ def train_step(model, data_loader, device):
     avg_loss = total_loss / data_loader.num_local_micro_batches
     return avg_loss
 
+def all_reduce_grads_across_dp_cp_ranks():
+    for param in model.parameters():
+        if param.grad is not None:
+            # Average the gradients across all DP & CP ranks
+            param.grad /= pgm.process_group_manager.cp_dp_world_size
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.cp_dp_group)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tp_size", type=int, default=1)
@@ -140,9 +147,8 @@ if __name__ == "__main__":
         else:
             loss = train_step(model, data_loader, device)
 
-        if pgm.process_group_manager.dp_world_size > 1:
-            # Average gradient across DP ranks
-            model.all_reduce_gradients()
+        if pgm.process_group_manager.dp_world_size > 1 or pgm.process_group_manager.cp_world_size > 1:
+            all_reduce_grads_across_dp_cp_ranks()
 
         optimizer.step()
         trained_tokens += tokens_per_step
