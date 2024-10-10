@@ -1,5 +1,5 @@
-import process_group_manager as pgm
-from distributed_primtives import communicate, bidirectional_communicate
+import distributed.process_group_manager as pgm
+from distributed.distributed_primtives import communicate, bidirectional_communicate
 import torch, torch.nn as nn, torch.nn.functional as F
 import torch.distributed as dist
 

@@ -1,7 +1,7 @@
 import os
-import process_group_manager as pgm
+import distributed.process_group_manager as pgm
 import torch, torch.distributed as dist
-import process_group_manager as pgm
+import distributed.process_group_manager as pgm
 
 STEP, VERBOSE = 0, os.environ.get("VERBOSE", "0") == "1"
 

@@ -10,7 +10,7 @@ from utils import set_all_seed
 import lovely_tensors as lt; lt.monkey_patch()
 
 from model import Llama
-from process_group_manager import setup_process_group_manager
+from distributed.process_group_manager import setup_process_group_manager
 
 def sanity_check_weights(model, model_hf, picotron_to_hf):
     

@@ -3,7 +3,7 @@ import random
 import numpy as np
 import builtins
 import fcntl
-import process_group_manager as pgm
+import distributed.process_group_manager as pgm
 
 def print(*args, **kwargs):
     """ solves multi-process interleaved print problem """

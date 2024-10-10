@@ -1,6 +1,6 @@
 import torch.distributed as dist
 import torch.nn as nn
-import process_group_manager as pgm
+import distributed.process_group_manager as pgm
 
 class DataParallel(nn.Module):
     def __init__(self, model, config):

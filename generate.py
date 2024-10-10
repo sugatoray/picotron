@@ -2,13 +2,13 @@
 import os
 import argparse
 import torch, torch.distributed as dist
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM,AutoTokenizer
+from transformers import AutoTokenizer, AutoConfig, AutoTokenizer
 
 from utils import set_all_seed
-import process_group_manager as pgm
-from process_group_manager import setup_process_group_manager
-from pipeline_parallel import PipelineParallel
-from distributed_primtives import communicate
+import distributed.process_group_manager as pgm
+from distributed.process_group_manager import setup_process_group_manager
+from parallel.pipeline_parallel import PipelineParallel
+from distributed.distributed_primtives import communicate
 from model import Llama
 
 def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
