@@ -9,10 +9,11 @@ import process_group_manager as pgm
 from process_group_manager import setup_process_group_manager
 from pipeline_parallel import PipelineParallel
 from distributed_primtives import communicate
+from model import Llama
 
 def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
     if pgm.process_group_manager.pp_world_size == 1:
-        return model.forward(batch, device) 
+        return model.forward(input_ids=batch["input_ids"], position_ids=batch["position_index"]) 
     
     batch_size = batch["input_ids"].shape[0]
     seq_len = batch["input_ids"].shape[1]
@@ -23,14 +24,14 @@ def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
     if pgm.process_group_manager.pp_is_last_stage:
         logits = torch.empty((batch_size, seq_len, int(config.vocab_size)), dtype=torch.float32, device=device)
 
-    recv_buffer = communicate(operation="recv_forward", shapes=tensor_shapes, dtype=torch.float32)
+    recv_buffer = communicate(operation="recv_forward", shapes=tensor_shapes, dtype=torch.float32, device=device)
     
     batch["hidden_states"] = None if pgm.process_group_manager.pp_is_first_stage else recv_buffer
 
     output_tensor = model.forward(batch, device)
     
     # Send output to the next stage.
-    communicate(operation="send_forward", tensor=output_tensor)
+    communicate(operation="send_forward", tensor=output_tensor, dtype=torch.float32, device=device)
 
     # Copy logits.
     if pgm.process_group_manager.pp_is_last_stage:
@@ -40,32 +41,55 @@ def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
     
     return logits
 
+def load_weights(model: Llama, save_path: str) -> None:
+    state_dict = torch.load(save_path)
+    #TODO: add check that we are not missing any weights
+    for name, param in model.named_parameters():
+        # This assume that the model has only weight parameters
+        new_name = name.split(".weight")[0]
+        module = model.get_submodule(new_name)
+        if name in state_dict:
+            param.data.copy_(state_dict[name])
+    
+    dist.barrier()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--load_path", type=str)
     parser.add_argument("--pp_size", type=int, default=1)
     parser.add_argument("--max_tokens", type=int, default=32)
     args = parser.parse_args()
     
     local_rank, world_size  = int(os.environ["LOCAL_RANK"]), int(os.environ["WORLD_SIZE"])
 
+    #TODO: add gloo backend for generation
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    setup_process_group_manager(tp_size=1, pp_size=args.pp_size, dp_size=1)
+    setup_process_group_manager(tp_size=1, pp_size=args.pp_size, dp_size=1, cp_size=1)
     set_all_seed(seed=42)
+
+    #TODO: find a better way (should need to specify model_name + path to .pth)
     model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
     config = AutoConfig.from_pretrained(model_name)
-    base_model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
-    model = PipelineParallel(base_model, config).to(device)
-    del base_model
-    
+
+    model = Llama(
+        config=config,
+        device=device,
+    )
+
+    model.load_state_dict(torch.load(args.load_path))
+    # model = PipelineParallel(base_model, config).to(device)
+
+    # del base_model
+
     model.eval()
     
     # Tokenize the input
     prompts = [
         "My name is",
-        "How old are you ?",
-        "What is your favorite color?",
+        # "How old are you ?",
+        # "What is your favorite color?",
     ]
     
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -73,7 +97,6 @@ if __name__ == "__main__":
     tokenizer.pad_token = tokenizer.eos_token
     
     tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding=True).to(device=device)
-
 
     for _ in range(args.max_tokens):
 
