@@ -13,6 +13,7 @@ from process_group_manager import setup_process_group_manager
 from pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from data_parallel import DataParallel
 from context_parallel import ContextParallel
+from model import Llama
 from dataset import MicroBatchDataLoader
 import wandb
 
@@ -108,7 +109,15 @@ if __name__ == "__main__":
             },
         )
     
-    model = AutoModelForCausalLM.from_pretrained(model_name, config=config).to(device)
+    #TODO: find a better way (should need to specify model_name + path to .pth)
+    model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
+    config = AutoConfig.from_pretrained(model_name)
+
+    model = Llama(
+        config=config,
+        device=device,
+    ).to(device)
+    model.load_state_dict(torch.load("smollm.pth"))
 
     if pgm.process_group_manager.cp_size > 1:
         model = ContextParallel(model, config).to(device)

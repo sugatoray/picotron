@@ -1,4 +1,4 @@
-#VERBOSE=0 torchrun --nproc_per_node 3 generate.py --pp_size 3
+#VERBOSE=0 torchrun --nproc_per_node 3 generate.py --pp_size 3 --load_path smollm.pth 
 import os
 import argparse
 import torch, torch.distributed as dist
@@ -41,18 +41,6 @@ def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
     
     return logits
 
-def load_weights(model: Llama, save_path: str) -> None:
-    state_dict = torch.load(save_path)
-    #TODO: add check that we are not missing any weights
-    for name, param in model.named_parameters():
-        # This assume that the model has only weight parameters
-        new_name = name.split(".weight")[0]
-        module = model.get_submodule(new_name)
-        if name in state_dict:
-            param.data.copy_(state_dict[name])
-    
-    dist.barrier()
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--load_path", type=str)
@@ -62,7 +50,7 @@ if __name__ == "__main__":
     
     local_rank, world_size  = int(os.environ["LOCAL_RANK"]), int(os.environ["WORLD_SIZE"])
 
-    #TODO: add gloo backend for generation
+    #TODO(fmom): add gloo backend for generation
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
@@ -73,23 +61,21 @@ if __name__ == "__main__":
     model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
     config = AutoConfig.from_pretrained(model_name)
 
-    model = Llama(
+    base_model = Llama(
         config=config,
         device=device,
     )
 
-    model.load_state_dict(torch.load(args.load_path))
-    # model = PipelineParallel(base_model, config).to(device)
-
-    # del base_model
-
+    base_model.load_state_dict(torch.load(args.load_path))
+    model = PipelineParallel(base_model, config).to(device)
+    del base_model
     model.eval()
     
     # Tokenize the input
     prompts = [
         "My name is",
-        # "How old are you ?",
-        # "What is your favorite color?",
+        "How old are you ?",
+        "What is your favorite color?",
     ]
     
     tokenizer = AutoTokenizer.from_pretrained(model_name)

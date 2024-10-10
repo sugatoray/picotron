@@ -13,11 +13,12 @@ def reduce_loss_across_dp_ranks(loss, device):
 class PipelineParallel(nn.Module):
     def __init__(self, model, config):
         super().__init__()
+        #TODO(fmom): find a better model to distributed layers without instantiating a base_model first
         layer_distribution = self.distribute_layers(config.num_hidden_layers)
-        self.embed_tokens = model.model.embed_tokens if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
-        self.decoder_layers = nn.ModuleDict({str(i): model.model.layers[i] for i in layer_distribution})
-        self.norm = model.model.norm if pgm.process_group_manager.pp_is_last_stage else nn.Identity()
-        self.lm_head = model.lm_head if pgm.process_group_manager.pp_is_last_stage else nn.Identity()
+        self.embedding = model.embedding if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
+        self.decoder_layers = nn.ModuleDict({str(i): model.decoder_layers[i] for i in layer_distribution})
+        self.final_norm = model.final_norm if pgm.process_group_manager.pp_is_last_stage else nn.Identity()
+        self.final_proj = model.final_proj if pgm.process_group_manager.pp_is_last_stage else nn.Identity()
 
     def distribute_layers(self, num_layers):
         layers_per_gpu = [num_layers // pgm.process_group_manager.pp_world_size + (1 if i < num_layers % pgm.process_group_manager.pp_world_size else 0) for i in range(pgm.process_group_manager.pp_world_size)]
@@ -26,11 +27,11 @@ class PipelineParallel(nn.Module):
 
     def forward(self, batch, device):
         x = batch["hidden_states"].to(device) if batch["hidden_states"] is not None else batch["input_ids"].to(device)
-        x = self.embed_tokens(x)
+        x = self.embedding(x)
         for layer in self.decoder_layers.values():
-            x = layer(x, position_ids=batch["position_index"].to(device))[0]
-        x = self.norm(x)
-        return self.lm_head(x)
+            x = layer(x, position_ids=batch["position_index"].to(device))
+        x = self.final_norm(x)
+        return self.final_proj(x)
 
     def backward(self, input_tensor, output_tensor, output_tensor_grad):
         if input_tensor is not None: input_tensor.retain_grad()

@@ -1,5 +1,5 @@
 """
-torchrun --nproc_per_node=1 convert_hf_to_picotron.py --save_path llama_weights.pth
+torchrun --nproc_per_node=1 convert_hf_to_picotron.py --save_path smollm.pth
 """
 import os
 import argparse
