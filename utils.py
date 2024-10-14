@@ -19,103 +19,62 @@ def set_all_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
     
-def display_parallelism_grid():
-    def _create_gpu_box(gpu_num, tp, cp, pp, dp):
-        return [
-            f"      GPU {gpu_num:<2}   ",
-            f"  +----------+",
-            f"  | tp{tp} cp{cp}  |",
-            f"  | pp{pp} dp{dp}  |",
-            f"  +----------+"
-        ]
-
-    def _create_row(start_gpu, tp_size, cp, pp, dp):
-        boxes = [_create_gpu_box(start_gpu + i, i, cp, pp, dp) for i in range(tp_size)]
-        return [" ".join(row) for row in zip(*boxes)]
-
-    def _add_pp_label(output):
-        output.append("   |  ")
-        output.append(" PP|  ")
-        output.append("   |  ")
-
-    def _add_cp_label(output):
-        output.append("   |  CP")
-
-    def _add_vertical_separator(output):
-        output.append("   |  ")
-        output.append("   |  |")
-
-    def _add_vertical_arrow(output):
-        output.append("   |  v")
-
-    def _add_horizontal_separator(output):
-        output.append("-" * 86)
-
-    def _create_tp_arrows_and_labels(tp_group_width):
-        tp_arrow = "-" * (tp_group_width - 4) + ">"
-        tp_label = f"{'TP':^{tp_group_width}}"
-        tp_arrows = f"         {tp_arrow:<{tp_group_width}}           {tp_arrow}"
-        tp_labels = f"         {tp_label:<{tp_group_width}}           {tp_label}"
-        return tp_arrows, tp_labels
-
-    def _create_dp_arrow_and_label(total_tp_width):
-        dp_arrow = "-" * (total_tp_width - 6) + ">"
-        dp_label = f"{'DP':^{total_tp_width}}"
-        return f"      {dp_arrow}", f"      {dp_label}"
-
-    output = []
-    tp_size = pgm.process_group_manager.tp_size
-    cp_size = pgm.process_group_manager.cp_size
-    pp_size = pgm.process_group_manager.pp_size
-    dp_size = pgm.process_group_manager.dp_size
-
-    output.append("=== Global Parallelism Configuration ===")
-    output.append(f"TP Size: {tp_size}, CP_size: {cp_size}, PP Size: {pp_size}, DP Size: {dp_size}")
-    output.append("")
-
-    for dp in range(0, dp_size, 2):
-        output.append("   |  ")
-
-        for pp in range(pp_size):
-            if pp == pp_size // 2:
-                _add_pp_label(output)
-            
-            _add_vertical_separator(output)
-            
-            for cp in range(cp_size):
-                left_start_gpu = dp * (tp_size * cp_size * pp_size) + pp * (tp_size * cp_size) + cp * tp_size
-                left_row = _create_row(left_start_gpu, tp_size, cp, pp, dp)
-
-                if dp + 1 < dp_size:
-                    right_start_gpu = (dp+1) * (tp_size * cp_size * pp_size) + pp * (tp_size * cp_size) + cp * tp_size
-                    right_row = _create_row(right_start_gpu, tp_size, cp, pp, dp+1)
-                    for l, r in zip(left_row, right_row):
-                        output.append(f"   |  | {l:<33}  {r}")
-                else:
-                    for l in left_row:
-                        output.append(f"   |  | {l}")
-
-                if cp < cp_size - 1:
-                    _add_cp_label(output)
-                output.append("   |  |")
-
-            _add_vertical_arrow(output)
-
-            if pp < pp_size - 1:
-                output.append("   |  ")
-
-        output.append("   |  ")
-        output.append("   v  ")
-
-        if dp + 2 < dp_size:
-            _add_horizontal_separator(output)
-
-    tp_group_width = tp_size * 13 - 1
-    total_tp_width = tp_group_width * 2 + 18
-
-    tp_arrows, tp_labels = _create_tp_arrows_and_labels(tp_group_width)
-    dp_arrow, dp_label = _create_dp_arrow_and_label(total_tp_width)
-
-    output.extend(["", tp_arrows, tp_labels, "", dp_arrow, dp_label])
-
-    print("\n".join(output))
+## def display_4D_parallelism_grid():
+#    #TODO(fmom): fix me
+#    #TODO(fmom): add color to distinguish between different parallelism groups
+#    def create_gpu_box(gpu_num, tp, cp, pp):
+#        return [
+#            f"+------+",
+#            f"|GPU:{gpu_num:<2d}|",
+#            f"| TP:{tp:d} |",
+#            f"| CP:{cp:d} |",
+#            f"| PP:{pp:d} |",
+#            f"+------+"
+#        ]
+#
+#    def create_node(start_gpu, tp_size, cp_size, pp_size, node_index):
+#        boxes = []
+#        for i in range(8):  # 8 GPUs per node
+#            gpu_num = start_gpu + i
+#            tp = gpu_num % tp_size
+#            cp = (gpu_num // tp_size) % cp_size
+#            pp = (gpu_num // (tp_size * cp_size)) % pp_size
+#            boxes.append(create_gpu_box(gpu_num, tp, cp, pp))
+#        return ['  '.join(row) for row in zip(*boxes)]
+#
+#    def create_dp_box(replica_output):
+#        width = len(replica_output[0]) + 4
+#        top_bottom = f"+{'-' * (width - 2)}+"
+#        return [top_bottom] + [f"| {line} |" for line in replica_output] + [top_bottom]
+#
+#    tp_size = pgm.process_group_manager.tp_size
+#    cp_size = pgm.process_group_manager.cp_size
+#    pp_size = pgm.process_group_manager.pp_size
+#    dp_size = pgm.process_group_manager.dp_size
+#    total_gpus_per_replica = tp_size * cp_size * pp_size
+#    num_nodes_per_replica = (total_gpus_per_replica + 7) // 8  # Round up to nearest whole node
+#
+#    output = []
+#    output.append("=== Simplified Parallelism Configuration ===")
+#    output.append(f"TP Size: {tp_size}, CP Size: {cp_size}, PP Size: {pp_size}, DP Size: {dp_size}")
+#    output.append(f"Total GPUs for one replica: {total_gpus_per_replica}")
+#    output.append(f"Number of nodes per replica: {num_nodes_per_replica} (8 GPUs per node)")
+#    output.append(f"Total GPUs: {total_gpus_per_replica * dp_size}")
+#    output.append(f"Total nodes: {num_nodes_per_replica * dp_size}")
+#    output.append("")
+#
+#    for dp in range(dp_size):
+#        replica_output = []
+#        for node in range(num_nodes_per_replica):
+#            start_gpu = (dp * total_gpus_per_replica) + (node * 8)
+#            node_output = create_node(start_gpu, tp_size, cp_size, pp_size, node)
+#            replica_output.append(f"Node {dp * num_nodes_per_replica + node}:")
+#            replica_output.extend(node_output)
+#            replica_output.append("")
+#
+#        dp_box = create_dp_box(replica_output)
+#        output.append(f"Data Parallel Group {dp}:")
+#        output.extend(dp_box)
+#        output.append("")
+#
+#    print("\n".join(output))

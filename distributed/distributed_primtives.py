@@ -5,7 +5,7 @@ import distributed.process_group_manager as pgm
 
 STEP, VERBOSE = 0, os.environ.get("VERBOSE", "0") == "1"
 
-def communicate(operation, device, dtype, tensor=None, shapes=None):
+def pipeline_communicate(operation, device, dtype, tensor=None, shapes=None):
     global STEP
     global VERBOSE
     if operation == 'recv_forward':
@@ -31,7 +31,7 @@ def communicate(operation, device, dtype, tensor=None, shapes=None):
     if VERBOSE: STEP += 1
     return tensor if not is_send else None
 
-def bidirectional_communicate(operation, send_tensor, recv_shapes, device, dtype):
+def bidirectional_pipeline_communicate(operation, send_tensor, recv_shapes, device, dtype):
     global STEP
     global VERBOSE
     is_fwd = (operation == 'send_fwd_recv_bwd')
@@ -44,3 +44,16 @@ def bidirectional_communicate(operation, send_tensor, recv_shapes, device, dtype
     torch.cuda.synchronize()
     if VERBOSE: STEP += 1
     return recv_tensor
+def all_reduce_loss_across_dp_ranks(loss, device):
+    reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
+    # Reduce the loss across all workers so that every rank has the updated loss value.
+    dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.world_group)
+    reduced_loss /= pgm.process_group_manager.dp_world_size
+    return reduced_loss.item()
+
+def all_reduce_gradients_across_dp_cp_ranks(model):
+    for param in model.parameters():
+        if param.grad is not None:
+            # Average the gradients across all DP & CP ranks
+            param.grad /= pgm.process_group_manager.cp_dp_world_size
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.cp_dp_group)

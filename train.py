@@ -10,13 +10,13 @@ from datasets import load_dataset
 import argparse
 
 import distributed.process_group_manager as pgm
-from utils import set_all_seed, display_parallelism_grid, print
+from distributed.distributed_primtives import all_reduce_gradients_across_dp_cp_ranks
+from utils import set_all_seed, print, display_4D_parallelism_grid
 from distributed.process_group_manager import setup_process_group_manager
 from parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from parallel.data_parallel import DataParallel
 from parallel.context_parallel import ContextParallel
 from model import Llama
-from dataset import MicroBatchDataLoader
 import wandb
 
 class MicroBatchDataLoader(DataLoader):
@@ -68,13 +68,6 @@ def train_step(model, data_loader, device):
     avg_loss = total_loss / data_loader.num_local_micro_batches
     return avg_loss
 
-def all_reduce_grads_across_dp_cp_ranks():
-    for param in model.parameters():
-        if param.grad is not None:
-            # Average the gradients across all DP & CP ranks
-            param.grad /= pgm.process_group_manager.cp_dp_world_size
-            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.cp_dp_group)
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tp_size", type=int, default=1)
@@ -106,14 +99,13 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
     
-    
     dist.init_process_group(rank=local_rank, world_size=world_size, backend=backend, init_method=f"tcp://{host}:{port}")
     
     setup_process_group_manager(tp_size=args.tp_size, cp_size=args.cp_size, pp_size=args.pp_size, dp_size=args.dp_size)
 
-    if pgm.process_group_manager.global_rank == 0:
-        display_parallelism_grid()
-
+    # if pgm.process_group_manager.global_rank == 0:
+        # display_4D_parallelism_grid()
+    
     set_all_seed(SEED)
     model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
     dataset_name = "roneneldan/TinyStories"
@@ -145,6 +137,7 @@ if __name__ == "__main__":
         config=config,
         device=device,
     ).to(device)
+
     model.load_state_dict(torch.load("smollm.pth"))
 
     if pgm.process_group_manager.cp_size > 1:
@@ -155,6 +148,9 @@ if __name__ == "__main__":
     
     if pgm.process_group_manager.dp_world_size > 1:
         model = DataParallel(model, config).to(device)
+
+    # if pgm.process_group_manager.tp_world_size > 1:
+        # model = TensorParallel(model, config).to(device)
 
     model.train()
     
@@ -181,11 +177,12 @@ if __name__ == "__main__":
         
         if pgm.process_group_manager.pp_world_size > 1:
             loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device)
+            # loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device)
         else:
             loss = train_step(model, data_loader, device)
 
         if pgm.process_group_manager.dp_world_size > 1 or pgm.process_group_manager.cp_world_size > 1:
-            all_reduce_grads_across_dp_cp_ranks()
+            all_reduce_gradients_across_dp_cp_ranks(model)
 
         optimizer.step()
         trained_tokens += tokens_per_step

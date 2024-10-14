@@ -8,7 +8,7 @@ from utils import set_all_seed
 import distributed.process_group_manager as pgm
 from distributed.process_group_manager import setup_process_group_manager
 from parallel.pipeline_parallel import PipelineParallel
-from distributed.distributed_primtives import communicate
+from distributed.distributed_primtives import pipeline_communicate
 from model import Llama
 
 def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
@@ -24,14 +24,14 @@ def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
     if pgm.process_group_manager.pp_is_last_stage:
         logits = torch.empty((batch_size, seq_len, int(config.vocab_size)), dtype=torch.float32, device=device)
 
-    recv_buffer = communicate(operation="recv_forward", shapes=tensor_shapes, dtype=torch.float32, device=device)
+    recv_buffer = pipeline_communicate(operation="recv_forward", shapes=tensor_shapes, dtype=torch.float32, device=device)
     
     batch["hidden_states"] = None if pgm.process_group_manager.pp_is_first_stage else recv_buffer
 
     output_tensor = model.forward(batch, device)
     
     # Send output to the next stage.
-    communicate(operation="send_forward", tensor=output_tensor, dtype=torch.float32, device=device)
+    pipeline_communicate(operation="send_forward", tensor=output_tensor, dtype=torch.float32, device=device)
 
     # Copy logits.
     if pgm.process_group_manager.pp_is_last_stage:
