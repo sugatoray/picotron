@@ -2,15 +2,10 @@ import torch.distributed as dist
 import torch.nn as nn
 import distributed.process_group_manager as pgm
 
-class DataParallel(nn.Module):
+from parallel.base_parallel import BaseParallel
+
+class DataParallel(BaseParallel):
     def __init__(self, model, config):
         #TODO: Add Zero1
         #TODO: Interleave all_reduce
-        super().__init__()
-        self.model = model
-
-    def forward(self, *args, **kwargs):
-        return self.model(*args, **kwargs)
-
-    def backward(self, input_tensor, output_tensor, output_tensor_grad):
-        return self.model.backward(input_tensor, output_tensor, output_tensor_grad)
+        super().__init__(model, config)

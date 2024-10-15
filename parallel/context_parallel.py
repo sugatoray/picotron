@@ -7,28 +7,19 @@ from typing import Any, Optional, Tuple
 from distributed.distributed_primtives import ContextComms
 from model import Attention
 import distributed.process_group_manager as pgm
-import lovely_tensors as lt; lt.monkey_patch()
 
-from utils import print
+from parallel.base_parallel import BaseParallel
 
-class ContextParallel(nn.Module):
+class ContextParallel(BaseParallel):
     def __init__(self, model, config):
-        super().__init__()
-        self.model = model
-        self.config = config
-        
-        for name, module in self.model.named_modules():
+        super().__init__(model, config)
+
+        for name, module in model.named_modules():
             if isinstance(module, Attention) and not isinstance(module, RingAttention):
                 parent_name, child_name = name.rsplit('.', 1)
-                parent_module = self.model.get_submodule(parent_name)
+                parent_module = model.get_submodule(parent_name)
                 setattr(parent_module, child_name, RingAttention(module))
                 del module
-
-    def forward(self, *args, **kwargs):
-        return self.model(*args, **kwargs)
-
-    def backward(self, input_tensor, output_tensor, output_tensor_grad):
-        return self.model.backward(input_tensor, output_tensor, output_tensor_grad)
 
 class RingAttention(nn.Module):
     def __init__(self, original_mha):
@@ -72,7 +63,6 @@ class RingAttention(nn.Module):
         k = self._repeat_kv(k, self.num_key_value_groups)
         v = self._repeat_kv(v, self.num_key_value_groups)
         
-        # Apply ring attention
         sm_scale = 1.0 / (q.size(-1) ** 0.5)
         output = RingAttentionFunc.apply(q, k, v, sm_scale, self.is_causal)
        

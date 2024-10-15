@@ -179,8 +179,7 @@ if __name__ == "__main__":
     tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN
 
     dist.barrier()
-    
-    #TODO: Add Context Parallelism
+
     #TODO: Double-check consumed tokens after each steps (for example, MICRO_BATCH_SIZE=2 and using only dp_size=4, num_local_micro_batches=0 => division by 0)
     #TODO: Check convergence
     #TODO: Try multi-nodes
