@@ -42,7 +42,9 @@ class ProcessGroupManager:
         self.cp_first_rank = self.cp_group_ids[0]
         self.cp_last_rank = self.cp_group_ids[-1]
         self.cp_world_size = dist.get_world_size(group=self.cp_group)
-        
+        self.cp_send_rank = self.cp_group_ids[(self.cp_rank + 1) % self.cp_size]
+        self.cp_recv_rank = self.cp_group_ids[(self.cp_rank - 1) % self.cp_size]
+
         # Pipeline parallelism
         self.pp_first_rank = self.pp_group_ids[0]
         self.pp_last_rank = self.pp_group_ids[-1]

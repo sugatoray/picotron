@@ -11,7 +11,7 @@ import argparse
 
 import distributed.process_group_manager as pgm
 from distributed.distributed_primtives import all_reduce_gradients_across_dp_cp_ranks
-from utils import set_all_seed, print, display_4D_parallelism_grid
+from utils import set_all_seed, print
 from distributed.process_group_manager import setup_process_group_manager
 from parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from parallel.data_parallel import DataParallel
@@ -26,6 +26,8 @@ class MicroBatchDataLoader(DataLoader):
         self.num_local_micro_batches = self.local_batch_size // self.micro_batch_size
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
         
+        self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
+
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.dataset = load_dataset(dataset_name, split=split)
         if num_samples: self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
@@ -42,8 +44,21 @@ class MicroBatchDataLoader(DataLoader):
     def collate_batch(self, batch_data):
         batch_input_ids = torch.stack([item['input_ids'] for item in batch_data])
         batch_size, seq_len = batch_input_ids.shape
-        return {"input_ids": batch_input_ids[:, :-1].T.contiguous(), "target_ids": batch_input_ids[:, 1:].T.contiguous(), "position_index": torch.arange(seq_len-1, dtype=torch.long).unsqueeze(1).expand(-1, batch_size).contiguous(), "attn_mask": torch.tril(torch.ones((seq_len-1, seq_len-1), dtype=torch.bool)).unsqueeze(0).expand(batch_size, -1, -1).contiguous(), "hidden_states": None}
-
+        start_idx = pgm.process_group_manager.cp_rank * self.seq_length_per_gpu
+        end_idx = start_idx + self.seq_length_per_gpu
+        input_ids = batch_input_ids[:, start_idx:end_idx].contiguous()
+        target_ids = batch_input_ids[:, start_idx+1:end_idx+1].contiguous()
+        position_index = torch.arange(start_idx, end_idx, dtype=torch.long).unsqueeze(0).expand(batch_size, -1).contiguous()        
+        local_attn_mask = torch.tril(torch.ones((self.seq_length_per_gpu, self.seq_length_per_gpu), dtype=torch.bool))
+        attn_mask = local_attn_mask.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+        
+        return {
+            "input_ids": input_ids,
+            "target_ids": target_ids,
+            "position_index": position_index,
+            "attn_mask": attn_mask,
+            "hidden_states": None
+        }
 
 def train_step(model, data_loader, device):
     total_loss = 0.0
@@ -55,11 +70,11 @@ def train_step(model, data_loader, device):
         position_ids = batch["position_index"].to(device)
         target_ids = batch["target_ids"].to(device)
 
-        outputs = model(input_ids=input_ids, position_ids=position_ids)
-        logits = outputs.logits
+        batch_size, seq_len = input_ids.shape
 
-        # Use your suggested cross_entropy calculation
-        loss = F.cross_entropy(logits.transpose(1, 2), target_ids, reduction='mean')
+        outputs = model(input_ids=input_ids, position_ids=position_ids)
+
+        loss = F.cross_entropy(outputs.view(batch_size * seq_len, -1), target_ids.view(-1), reduction="mean")
 
         loss.backward()
 
@@ -90,6 +105,8 @@ if __name__ == "__main__":
     port = int(os.environ["MASTER_PORT"])
     
     SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 10, 6, 2, 1e-4, 20, 1800, 42
+
+    assert SEQ_LEN % args.cp_size == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
 
     backend = "gloo" if args.use_cpu else "nccl"
     
@@ -140,6 +157,9 @@ if __name__ == "__main__":
 
     model.load_state_dict(torch.load("smollm.pth"))
 
+    # if pgm.process_group_manager.tp_world_size > 1:
+        # model = TensorParallel(model, config).to(device)
+
     if pgm.process_group_manager.cp_size > 1:
         model = ContextParallel(model, config).to(device)
 
@@ -149,13 +169,10 @@ if __name__ == "__main__":
     if pgm.process_group_manager.dp_world_size > 1:
         model = DataParallel(model, config).to(device)
 
-    # if pgm.process_group_manager.tp_world_size > 1:
-        # model = TensorParallel(model, config).to(device)
-
     model.train()
     
     data_loader = MicroBatchDataLoader(GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, SEQ_LEN, dataset_name, model_name, num_samples=NUM_SAMPLES)
-    tensor_shapes = (SEQ_LEN, data_loader.micro_batch_size, config.hidden_size)
+    tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, config.hidden_size)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     
     trained_tokens, step = 0, 0

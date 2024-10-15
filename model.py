@@ -70,9 +70,9 @@ class RotaryEmbedding(nn.Module):
         k_embed = (k * cos) + (self._rotate_half(k) * sin)
         return q_embed, k_embed
 
-class MultiHeadAttention(nn.Module):
+class Attention(nn.Module):
     def __init__(self, config, is_causal):
-        super(MultiHeadAttention, self).__init__()
+        super(Attention, self).__init__()
         
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -90,10 +90,10 @@ class MultiHeadAttention(nn.Module):
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.rotary = RotaryEmbedding(dim=self.head_dim, max_position_embeddings=self.max_position_embeddings, base=self.rope_theta)
 
-    def forward(self, x, position_ids):
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+    def forward(self, input_ids, position_ids):
+        q = self.q_proj(input_ids)
+        k = self.k_proj(input_ids)
+        v = self.v_proj(input_ids)
         
         batch, seq_len, _ = q.shape
         
@@ -130,7 +130,7 @@ class DecoderLayer(nn.Module):
     def __init__(self, config, is_causal):
         super(DecoderLayer, self).__init__()
         
-        self.attention = MultiHeadAttention(config, is_causal)
+        self.attention = Attention(config, is_causal)
         self.norm_attn = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = MLP(config)
         self.norm_mlp = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
