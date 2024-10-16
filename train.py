@@ -265,6 +265,10 @@ if __name__ == "__main__":
         trained_tokens += tokens_per_step
         step += 1
         
+        # In DDP implementation I need to reset the gradient buffers
+        if hasattr(model, 'reset'):
+            model.reset()
+        
         if pgm.process_group_manager.global_rank == 0:
             if pgm.process_group_manager.dp_world_size > 1 or pgm.process_group_manager.cp_world_size > 1:
                 handle.wait()
