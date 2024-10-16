@@ -1,6 +1,6 @@
 import torch.distributed as dist
 import torch.nn as nn
-import distributed.process_group_manager as pgm
+import src.distributed.process_group_manager as pgm
 
 
 class ContextParallel(nn.Module):
