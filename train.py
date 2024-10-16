@@ -28,6 +28,7 @@ from src.parallel.data_parallel.data_parallel_bucket import DataParallel
 from src.parallel.context_parallel import ContextParallel
 from model import LLaMA
 import wandb
+import multiprocessing
 
 class MicroBatchDataLoader(DataLoader):
     def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, split="train", num_samples=None, num_workers=0):
@@ -38,6 +39,8 @@ class MicroBatchDataLoader(DataLoader):
         self.num_local_micro_batches = self.local_batch_size // self.micro_batch_size
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
         
+        self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
+
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.dataset = load_dataset(dataset_name, split=split)
         if num_samples:
@@ -173,6 +176,8 @@ if __name__ == "__main__":
     ## hyperparameters
     SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 16, 4, 3e-4, 100000, int(10e8), 42
 
+    assert SEQ_LEN % args.cp_size == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
+
     backend = "gloo" if args.use_cpu else "nccl"
     
     if backend == "nccl":
@@ -214,9 +219,6 @@ if __name__ == "__main__":
                 "global_batch_size": GLOBAL_BATCH_SIZE,
             },
         )
-    
-
-    # model.load_state_dict(torch.load("smollm.pth"))
 
     if pgm.process_group_manager.cp_size > 1:
         model = ContextParallel(model, config)
@@ -233,15 +235,14 @@ if __name__ == "__main__":
     model.train()
     
     data_loader = MicroBatchDataLoader(GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, SEQ_LEN, dataset_name, model_name, num_samples=NUM_SAMPLES)
-    tensor_shapes = (SEQ_LEN, data_loader.micro_batch_size, config.hidden_size)
+    tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, config.hidden_size)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     
     trained_tokens, step = 0, 0
     tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN
 
     dist.barrier()
-    
-    #TODO: Add Context Parallelism
+
     #TODO: Double-check consumed tokens after each steps (for example, MICRO_BATCH_SIZE=2 and using only dp_size=4, num_local_micro_batches=0 => division by 0)
     #TODO: Check convergence
     #TODO: Try multi-nodes

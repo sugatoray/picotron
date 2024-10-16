@@ -3,9 +3,11 @@ from src.distributed.distributed_primtives import pipeline_communicate, bidirect
 import torch, torch.nn as nn, torch.nn.functional as F
 import torch.distributed as dist
 
-class PipelineParallel(nn.Module):
+from parallel.base_parallel import BaseParallel
+
+class PipelineParallel(BaseParallel):
     def __init__(self, model, config):
-        super().__init__()
+        super().__init__(model, config)
         #TODO(fmom): find a better model to distributed layers without instantiating a base_model first
         layer_distribution = self.distribute_layers(config.num_hidden_layers)
         self.embedding = model.embedding if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
