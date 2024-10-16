@@ -1,4 +1,13 @@
+"""Training script for LLaMA model.
+torchrun --nproc_per_node 1 --master_addr localhost --master_port 25500 train.py
+torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 2
+torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 1 --dp_size 2
+CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=1 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py
+CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
 #VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
+"""
+
+import multiprocessing
 import os
 import torch.nn.functional as F
 import torch, torch.distributed as dist
@@ -8,65 +17,136 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader, DistributedSampler
 from datasets import load_dataset
 import argparse
-
-import distributed.process_group_manager as pgm
-from distributed.distributed_primtives import all_reduce_gradients_across_dp_cp_ranks
-from utils import set_all_seed, print, display_4D_parallelism_grid
-from distributed.process_group_manager import setup_process_group_manager
-from parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
-from parallel.data_parallel import DataParallel
-from parallel.context_parallel import ContextParallel
-from model import Llama
+from datasets import Features, Sequence, Value
+import numpy as np
+import src.distributed.process_group_manager as pgm
+from utils import set_all_seed, print
+from src.distributed.process_group_manager import setup_process_group_manager
+from src.parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
+from dataclasses import dataclass
+from src.parallel.data_parallel.data_parallel_bucket import DataParallel
+from src.parallel.context_parallel import ContextParallel
+from model import LLaMA
 import wandb
 
 class MicroBatchDataLoader(DataLoader):
-    def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, split="train", num_samples=None):
-        self.global_batch_size, self.micro_batch_size, self.seq_length = global_batch_size, micro_batch_size, seq_length
-        self.local_batch_size = self.global_batch_size // pgm.process_group_manager.dp_world_size
+    def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, split="train", num_samples=None, num_workers=0):
+        self.global_batch_size = global_batch_size
+        self.micro_batch_size = micro_batch_size
+        self.seq_length = seq_length
+        self.local_batch_size = self.global_batch_size // pgm.process_group_manager.dp_world_size # each DP rank gets a local batch
         self.num_local_micro_batches = self.local_batch_size // self.micro_batch_size
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
         
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.dataset = load_dataset(dataset_name, split=split)
-        if num_samples: self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
+        if num_samples:
+            self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
+        
         dist.barrier()
-        self.dataset = self.dataset.map(lambda examples: self.tokenizer(examples["text"], padding="max_length", truncation=True, max_length=self.seq_length + 1, return_special_tokens_mask=False), batched=True, remove_columns=self.dataset.column_names).with_format("torch", columns=["input_ids"])
         
-        self.sampler = DistributedSampler(self.dataset, num_replicas=pgm.process_group_manager.dp_world_size, rank=pgm.process_group_manager.dp_rank, shuffle=False)
+        # Tokenize and chunk the dataset
+        self.tokenized_dataset = self.tokenize_dataset(self.dataset, "text", self.seq_length)
         
-        super().__init__(self.dataset, batch_size=micro_batch_size, collate_fn=self.collate_batch, pin_memory=True, num_workers=3, sampler=self.sampler, shuffle=False)
+        self.sampler = DistributedSampler(
+            self.tokenized_dataset, 
+            num_replicas=pgm.process_group_manager.dp_world_size, 
+            rank=pgm.process_group_manager.dp_rank, 
+            shuffle=False
+        )
+        
+        super().__init__(
+            self.tokenized_dataset, 
+            batch_size=micro_batch_size if pgm.process_group_manager.pp_world_size > 1 else self.local_batch_size, # in PP we split a single batch into multiple micro-batches
+            collate_fn=self.collate_batch, 
+            pin_memory=True, 
+            num_workers=num_workers, 
+            sampler=self.sampler, 
+            shuffle=False
+        )
 
-    def set_epoch(self, epoch):
-        self.sampler.set_epoch(epoch)
+    def tokenize_dataset(self, dataset, text_column_name, sequence_length, num_proc=48):
+        def _tokenizer_group_text(texts):
+            tokenized_text_batch = self.tokenizer.batch_encode_plus(
+                texts,
+                return_attention_mask=False,
+                return_token_type_ids=False,
+                return_tensors='np'
+            )
+            concatenated_tokens = {'input_ids': np.concatenate(tokenized_text_batch['input_ids'])}
+            total_length = len(concatenated_tokens['input_ids'])
+            if total_length >= sequence_length + 1:
+                total_length = ((total_length - 1) // sequence_length) * sequence_length + 1
+            result = {
+                'input_ids': [
+                    concatenated_tokens['input_ids'][i : i + sequence_length + 1]
+                    for i in range(0, total_length - sequence_length, sequence_length)
+                ]
+            }
+            return result
 
-    def collate_batch(self, batch_data):
-        batch_input_ids = torch.stack([item['input_ids'] for item in batch_data])
-        batch_size, seq_len = batch_input_ids.shape
-        return {"input_ids": batch_input_ids[:, :-1].T.contiguous(), "target_ids": batch_input_ids[:, 1:].T.contiguous(), "position_index": torch.arange(seq_len-1, dtype=torch.long).unsqueeze(1).expand(-1, batch_size).contiguous(), "attn_mask": torch.tril(torch.ones((seq_len-1, seq_len-1), dtype=torch.bool)).unsqueeze(0).expand(batch_size, -1, -1).contiguous(), "hidden_states": None}
+        tokenized_dataset = dataset.map(
+            _tokenizer_group_text,
+            input_columns=text_column_name,
+            remove_columns=dataset.column_names,
+            features=Features({"input_ids": Sequence(feature=Value(dtype="int64"), length=sequence_length + 1)}),
+            batched=True,
+            num_proc=num_proc,  # Adjust this based on your system capabilities
+            load_from_cache_file=True,
+            desc=f"Grouping texts in chunks of {sequence_length+1}",
+        )
 
+        return tokenized_dataset
+
+    def collate_batch(self, batch):
+        input_ids = [item['input_ids'][:-1] for item in batch]
+        label_ids = [item['input_ids'][1:] for item in batch]
+        attention_mask = [[1] * len(input_id) for input_id in input_ids]
+        label_mask = [[1] * len(label_id) for label_id in label_ids]
+        
+        return {
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
+            'target_ids': torch.tensor(label_ids, dtype=torch.long),
+            'attention_mask': torch.tensor(attention_mask, dtype=torch.long),
+            'label_mask': torch.tensor(label_mask, dtype=torch.long),
+        }
+        
+    def __iter__(self):
+        if self._iterator is None:
+            self._iterator = super().__iter__()
+        return self
+
+    def __next__(self):
+        if self._iterator is None:
+            self._iterator = super().__iter__()
+        try:
+            batch = next(self._iterator)
+        except StopIteration:
+            self._iterator = None
+            raise StopIteration
+        return batch
 
 def train_step(model, data_loader, device):
-    total_loss = 0.0
+    acc_loss = 0.0
+    
+    # get the next batch
+    batch = next(data_loader)
+    input_ids = batch["input_ids"].to(device)
+    target_ids = batch["target_ids"].to(device)
+    
+    outputs = model(input_ids=input_ids)
 
-    for _ in range(data_loader.num_local_micro_batches):
-        batch = next(iter(data_loader))
-        
-        input_ids = batch["input_ids"].to(device)
-        position_ids = batch["position_index"].to(device)
-        target_ids = batch["target_ids"].to(device)
+    # compute the loss
+    batch_size, seq_len = input_ids.shape
+    target_ids = target_ids.reshape(-1)
+    outputs = outputs.view(seq_len*batch_size, -1)
+    loss = F.cross_entropy(outputs, target_ids, reduction='mean')
+    
+    loss.backward()
 
-        outputs = model(input_ids=input_ids, position_ids=position_ids)
-        logits = outputs.logits
+    acc_loss += loss.item()
 
-        # Use your suggested cross_entropy calculation
-        loss = F.cross_entropy(logits.transpose(1, 2), target_ids, reduction='mean')
-
-        loss.backward()
-
-        total_loss += loss.item()
-
-    avg_loss = total_loss / data_loader.num_local_micro_batches
-    return avg_loss
+    return acc_loss
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -89,7 +169,9 @@ if __name__ == "__main__":
     host = os.environ["MASTER_ADDR"]
     port = int(os.environ["MASTER_PORT"])
     
-    SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 10, 6, 2, 1e-4, 20, 1800, 42
+    # SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 10, 6, 2, 1e-4, 20, 1800, 42
+    ## hyperparameters
+    SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 16, 4, 3e-4, 100000, int(10e8), 42
 
     backend = "gloo" if args.use_cpu else "nccl"
     
@@ -107,9 +189,13 @@ if __name__ == "__main__":
         # display_4D_parallelism_grid()
     
     set_all_seed(SEED)
-    model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
     dataset_name = "roneneldan/TinyStories"
+    model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
     config = AutoConfig.from_pretrained(model_name)
+
+    model = LLaMA(
+        config=config
+    ).to(device)
     
     if pgm.process_group_manager.global_rank == 0 and args.use_wandb:
         wandb.init(
@@ -129,28 +215,20 @@ if __name__ == "__main__":
             },
         )
     
-    #TODO: find a better way (should need to specify model_name + path to .pth)
-    model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
-    config = AutoConfig.from_pretrained(model_name)
 
-    model = Llama(
-        config=config,
-        device=device,
-    ).to(device)
-
-    model.load_state_dict(torch.load("smollm.pth"))
+    # model.load_state_dict(torch.load("smollm.pth"))
 
     if pgm.process_group_manager.cp_size > 1:
-        model = ContextParallel(model, config).to(device)
+        model = ContextParallel(model, config)
 
     if pgm.process_group_manager.pp_world_size > 1:
-        model = PipelineParallel(model, config).to(device)
+        model = PipelineParallel(model, config)
     
     if pgm.process_group_manager.dp_world_size > 1:
-        model = DataParallel(model, config).to(device)
+        model = DataParallel(model, pgm.process_group_manager.dp_group)
 
     # if pgm.process_group_manager.tp_world_size > 1:
-        # model = TensorParallel(model, config).to(device)
+        # model = TensorParallel(model, config)
 
     model.train()
     
@@ -171,25 +249,30 @@ if __name__ == "__main__":
     #TODO: add gradient accumulation
     
     while trained_tokens < MAX_TOKENS:        
-        data_loader.set_epoch(step)
-
         optimizer.zero_grad()
         
         if pgm.process_group_manager.pp_world_size > 1:
             loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device)
-            # loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device)
         else:
             loss = train_step(model, data_loader, device)
-
+        
+        # average the loss across all DP/CP ranks
         if pgm.process_group_manager.dp_world_size > 1 or pgm.process_group_manager.cp_world_size > 1:
-            all_reduce_gradients_across_dp_cp_ranks(model)
-
+            loss_tensor = torch.tensor([loss], dtype=torch.float32, device=device)
+            handle = dist.all_reduce(loss_tensor, group=pgm.process_group_manager.cp_dp_group, async_op=True, op=dist.ReduceOp.AVG)
+        
         optimizer.step()
         trained_tokens += tokens_per_step
         step += 1
         
         if pgm.process_group_manager.global_rank == 0:
-            print(f"[rank {pgm.process_group_manager.global_rank}] Step: {step}, Loss: {loss:.4f}, Tokens: {trained_tokens}/{MAX_TOKENS}")
+            if pgm.process_group_manager.dp_world_size > 1 or pgm.process_group_manager.cp_world_size > 1:
+                handle.wait()
+                loss = loss_tensor.item()
+            print(f"[rank {pgm.process_group_manager.global_rank}] Step: {step}, Loss: {loss:.4f}, "
+                f"Global batch size: {tokens_per_step}, "
+                f"Tokens: {trained_tokens}/{MAX_TOKENS}"
+                )
         
         if pgm.process_group_manager.global_rank == 0 and args.use_wandb:
             wandb.log({"loss": loss, "trained_tokens": trained_tokens})
