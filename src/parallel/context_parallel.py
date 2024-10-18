@@ -10,7 +10,9 @@ import src.distributed.process_group_manager as pgm
 
 class ContextParallel(nn.Module):
     def __init__(self, model, config):
-        super().__init__(model, config)
+        super().__init__()
+
+        self.model = model
 
         for name, module in model.named_modules():
             if isinstance(module, Attention) and not isinstance(module, RingAttention):

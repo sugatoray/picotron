@@ -234,7 +234,7 @@ if __name__ == "__main__":
         )
 
     if pgm.process_group_manager.tp_world_size > 1:
-        TensorParallel(model)
+        model = TensorParallel(model)
 
     # if pgm.process_group_manager.cp_size > 1:
         #TODO: do at the very end when we have fix convergence issue
