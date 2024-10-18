@@ -5,9 +5,12 @@ import torch.nn as nn
 class TensorParallel(nn.Module):
     def __init__(self, model, init_method = init.xavier_normal_):
         module_linear_name_stype_mapping_list = [
-            ("attention", "qkv_proj", "column"),
+            ("attention", "q_proj", "column"),
+            ("attention", "k_proj", "column"),
+            ("attention", "v_proj", "column"),
             ("attention", "out_proj", "row"),
-            ("mlp", "gate_up_proj", "column"),
+            ("mlp", "up_proj", "column"),
+            ("mlp", "gate_proj", "column"),
             ("mlp", "down_proj", "row"),
         ]
         
@@ -17,11 +20,7 @@ class TensorParallel(nn.Module):
             for module_name, linear_proj_name, style in module_linear_name_stype_mapping_list:
                 self.replace_module(getattr(layer, module_name), linear_proj_name, style)
         self.replace_module(model, "embedding", "vocab")   
-        self.replace_module(model, "final_proj", "column", args={"gather_output": True})  
-        
-        # for name, param in model.named_parameters():
-        #     print(name, param.shape, param.requires_grad)
-        
+        self.replace_module(model, "final_proj", "column", args={"gather_output": True})    
 
     def replace_module(self,module, linear_proj_name, style, args = {}):
         assert style in ["column", "row", 'vocab']

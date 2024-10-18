@@ -29,6 +29,7 @@ class LlamaRMSNorm(nn.Module):
         return self.weight * hidden_states.to(input_dtype)
 
 def apply_rotary_pos_emb(x, cos, sin):
+    #TODO: Maybe do class RotaryEmbedding(nn.Module) later
     batch_size, num_head, seq_length, head_dim = x.size()
     x1 = x[..., : head_dim // 2]  
     x2 = x[..., head_dim // 2 :]  
@@ -51,7 +52,7 @@ def flash_attention(q, k, v, causal = True):
     v = v.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
     return flash_attn_func(q, k, v, causal=causal)
 
-class CausalSelfAttention(nn.Module):
+class Attention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -61,43 +62,27 @@ class CausalSelfAttention(nn.Module):
         model_parallel_size = pgm.process_group_manager.tp_world_size
         self.num_local_heads = config.num_attention_heads // model_parallel_size # TP parallelism
         self.num_local_kv_heads = config.num_key_value_heads // model_parallel_size # TP parallelism
-        self.is_merged_qkv_weight = os.getenv('MERGED_QKV_WEIGHT', '1')
-        if self.is_merged_qkv_weight  == '1': 
-            self.qkv_proj = nn.Linear(config.hidden_size, self.num_heads*self.head_dim + 2*self.num_key_values*self.head_dim, bias=False)
-            # self.qkv_proj = ColumnParallelLinear(config.hidden_size, self.num_heads*self.head_dim + 2*self.num_key_values*self.head_dim, bias=False, gather_output=False, init_method=init_method)
-        else:
-            self.q_proj = nn.Linear(config.hidden_size, self.num_heads*self.head_dim, bias=False)
-            self.k_proj = nn.Linear(config.hidden_size, self.num_key_values*self.head_dim, bias=False)
-            self.v_proj = nn.Linear(config.hidden_size, self.num_key_values*self.head_dim, bias=False)
-            # self.q_proj = ColumnParallelLinear(config.hidden_size, self.num_heads*self.head_dim, bias=False, gather_output=False, init_method=init_method) # why the init method is x? Xavier is better?
-            # self.k_proj = ColumnParallelLinear(config.hidden_size, self.num_key_values*self.head_dim, bias=False, gather_output=False, init_method=init_method)
-            # self.v_proj = ColumnParallelLinear(config.hidden_size, self.num_key_values*self.head_dim, bias=False, gather_output=False, init_method=init_method)
+       
+        self.q_proj = nn.Linear(config.hidden_size, self.num_heads*self.head_dim, bias=False)
+        self.k_proj = nn.Linear(config.hidden_size, self.num_key_values*self.head_dim, bias=False)
+        self.v_proj = nn.Linear(config.hidden_size, self.num_key_values*self.head_dim, bias=False)
+        # self.q_proj = ColumnParallelLinear(config.hidden_size, self.num_heads*self.head_dim, bias=False, gather_output=False, init_method=init_method) # why the init method is x? Xavier is better?
+        # self.k_proj = ColumnParallelLinear(config.hidden_size, self.num_key_values*self.head_dim, bias=False, gather_output=False, init_method=init_method)
+        # self.v_proj = ColumnParallelLinear(config.hidden_size, self.num_key_values*self.head_dim, bias=False, gather_output=False, init_method=init_method)
         # if os.getenv('FLASH_ROPE', '1') == '1':
         #     self.flash_rope = FlashRotaryEmbedding(dim=self.head_dim, interleaved=False, base=500000.0)
         
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         # self.out_proj = RowParallelLinear(self.num_heads * self.head_dim, config.hidden_size, bias=False, input_is_parallel=True, init_method=init_method)
-        self.kv_cache = None
         self.layer_idx = layer_idx
         
         ## TODO support mask
     
     def forward(self, x, cos, sin, attention_mask=None, position_ids=None):
         batch_size, seq_length, hidden_dim = x.size()
-        if self.is_merged_qkv_weight == '1':
-            qkv = self.qkv_proj(x) # [batch_size, seq_length, num_heads*head_dim + 2*num_key_values*head_dim]
-            q, k, v = torch.split(qkv,
-                [
-                    self.num_local_heads * self.head_dim,
-                    self.num_local_kv_heads * self.head_dim,
-                    self.num_local_kv_heads * self.head_dim,
-                ],
-                dim=-1,
-            ) # [batch_size, seq_length, num_heads*head_dim] / [batch_size, seq_length, num_key_values*head_dim] / [batch_size, seq_length, num_key_values*head_dim]
-        else:
-            q = self.q_proj(x) # [batch_size, seq_length, num_heads*head_dim]
-            k = self.k_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
-            v = self.v_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
+        q = self.q_proj(x) # [batch_size, seq_length, num_heads*head_dim]
+        k = self.k_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
+        v = self.v_proj(x) # [batch_size, seq_length, num_key_values*head_dim]
         if os.getenv('FLASH_ROPE', '0') != '1':
             q = q.view(batch_size, seq_length, self.num_local_heads, self.head_dim).transpose(1, 2)       # [batch_size, num_heads, seq_length, head_dim]
             k = k.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(1, 2)  # [batch_size, num_key_values, seq_length, head_dim]
@@ -112,12 +97,10 @@ class CausalSelfAttention(nn.Module):
             q = q.transpose(1, 2)                                                                   # [batch_size, num_heads, seq_length, head_dim]
             k = k.transpose(1, 2)                                                                   # [batch_size, num_key_values, seq_length, head_dim]
             v = v.view(batch_size, seq_length, self.num_local_kv_heads, self.head_dim).transpose(1,2)   # [batch_size, num_key_values, seq_length, head_dim]
-        if self.kv_cache is not None:
-            # update kv_cache, and get stored k, v
-            assert position_ids is not None, "position_ids should be provided to update kv_cache"
-            k, v = self.kv_cache.update_cache_get_kv(k, v, position_ids)
+        
         k = k.repeat_interleave(self.num_local_heads // self.num_local_kv_heads, dim=1) # [batch_size, num_heads, seq_length, head_dim]
         v = v.repeat_interleave(self.num_local_heads // self.num_local_kv_heads, dim=1) # [batch_size, num_heads, seq_length, head_dim]
+        
         if os.getenv('ATTENTION', 'SDPA') == 'SDPA':
             causal = True if q.size(2) == k.size(2) else False # During decoding phase. The lenghth of q is usually 1. 
             out = F.scaled_dot_product_attention(q, k, v, is_causal=causal) # [batch_size, num_heads, seq_length, head_dim]
@@ -130,25 +113,18 @@ class CausalSelfAttention(nn.Module):
         return out
 
 
-class LLaMAMLP(nn.Module):
+class MLP(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
-        self.merged_gate_up = os.getenv('MERGED_GATE_UP_WEIGHT', '1') == '1'
-        if self.merged_gate_up:
-            self.gate_up_proj = nn.Linear(config.hidden_size, config.intermediate_size*2, bias=False)
-            # self.gate_up_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size*2, bias=False, gather_output=False, init_method=init_method)
-        else:
-            # self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-            # self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-            self.up_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False, init_method=init_method)
-            self.gate_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False, init_method=init_method)
+        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        # self.up_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False, init_method=init_method)
+        # self.gate_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False, init_method=init_method)
         # self.down_proj = RowParallelLinear(config.intermediate_size, config.hidden_size, bias=False, input_is_parallel=True, init_method=init_method)
         
     def forward(self, x):
-        if  self.merged_gate_up:
-            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
-            return self.down_proj(F.silu(gate) * up)
+        #TODO: dont do single line operations as it is harder to debug
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 class DecoderLayer(nn.Module):
@@ -158,8 +134,8 @@ class DecoderLayer(nn.Module):
         RMSNorm = LlamaRMSNorm
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.attention = CausalSelfAttention(config, layer_idx = layer_idx)
-        self.mlp = LLaMAMLP(config)
+        self.attention = Attention(config, layer_idx = layer_idx)
+        self.mlp = MLP(config)
         self.layer_idx = layer_idx
         head_dim = config.hidden_size // config.num_attention_heads
         self.cos, self.sin = get_cos_sin(config.max_position_embeddings, head_dim=head_dim , base=config.rope_theta) # [max_position_embeddings, head_dim]
@@ -172,7 +148,7 @@ class DecoderLayer(nn.Module):
         x = x + self.mlp(self.post_attention_layernorm(x)) # MLP
         return x
     
-class LLaMA(nn.Module):
+class Llama(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         # sanity check 
