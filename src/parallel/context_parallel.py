@@ -8,9 +8,7 @@ from src.distributed.distributed_primtives import ContextComms
 from model import Attention
 import src.distributed.process_group_manager as pgm
 
-from src.parallel.base_parallel import BaseParallel
-
-class ContextParallel(BaseParallel):
+class ContextParallel(nn.Module):
     def __init__(self, model, config):
         super().__init__(model, config)
 
@@ -20,6 +18,12 @@ class ContextParallel(BaseParallel):
                 parent_module = model.get_submodule(parent_name)
                 setattr(parent_module, child_name, RingAttention(module))
                 del module
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.model, name)
 
 class RingAttention(nn.Module):
     def __init__(self, original_mha):

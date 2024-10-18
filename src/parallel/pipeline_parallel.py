@@ -1,5 +1,5 @@
 import src.distributed.process_group_manager as pgm
-from src.distributed.distributed_primtives import pipeline_communicate, bidirectional_pipeline_communicate, all_reduce_loss_across_dp_ranks
+from src.distributed.distributed_primtives import pipeline_communicate, bidirectional_pipeline_communicate
 import torch, torch.nn as nn, torch.nn.functional as F
 
 class PipelineParallel(nn.Module):
@@ -56,7 +56,6 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device):
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         pipeline_communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=torch.float32)
 
-    logging_loss = all_reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss
 
 def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device):
@@ -104,5 +103,4 @@ def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device):
         input_tensor_grad = model.backward(input_tensor, output_tensor, output_tensor_grad)
         pipeline_communicate(operation='send_backward', tensor=input_tensor_grad, device=device, dtype=torch.float32)
 
-    logging_loss = all_reduce_loss_across_dp_ranks(logging_loss, device)
     return logging_loss

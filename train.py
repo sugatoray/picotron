@@ -29,6 +29,7 @@ from src.parallel.data_parallel.data_parallel_bucket import DataParallel
 from src.parallel.context_parallel import ContextParallel
 from model import Llama
 import wandb
+from src.distributed.distributed_primtives import all_reduce_loss_across_pp_dp_ranks
 
 class MicroBatchDataLoader(DataLoader):
     def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc=1, split="train", num_samples=None):
@@ -120,22 +121,7 @@ class MicroBatchDataLoader(DataLoader):
             "attn_mask": attn_mask,
             "hidden_states": None
         }
-        
-    def __iter__(self):
-        if self._iterator is None:
-            self._iterator = super().__iter__()
-        return self
-
-    def __next__(self):
-        if self._iterator is None:
-            self._iterator = super().__iter__()
-        try:
-            batch = next(self._iterator)
-        except StopIteration:
-            self._iterator = None
-            raise StopIteration
-        return batch
-
+    
     def __iter__(self):
         if self._iterator is None:
             self._iterator = super().__iter__()
@@ -289,12 +275,8 @@ if __name__ == "__main__":
         else:
             loss = train_step(model, data_loader, device)
         
-        # average the loss across all DP/CP ranks
-        if pgm.process_group_manager.dp_world_size > 1 or pgm.process_group_manager.cp_world_size > 1:
-            #TODO: use all_reduce function from distributed_primitives.py
-            loss_tensor = torch.tensor([loss], dtype=torch.float32, device=device)
-            handle = dist.all_reduce(loss_tensor, group=pgm.process_group_manager.cp_dp_group, async_op=True, op=dist.ReduceOp.AVG)
-        
+        loss = all_reduce_loss_across_pp_dp_ranks(loss, device)
+
         optimizer.step()
         trained_tokens += tokens_per_step
         step += 1
@@ -304,9 +286,6 @@ if __name__ == "__main__":
             model.reset()
         
         if pgm.process_group_manager.global_rank == 0:
-            if pgm.process_group_manager.dp_world_size > 1 or pgm.process_group_manager.cp_world_size > 1:
-                handle.wait()
-                loss = loss_tensor.item()
             print(f"[rank {pgm.process_group_manager.global_rank}] Step: {step}, Loss: {loss:.4f}, "
                 f"Global batch size: {tokens_per_step}, "
                 f"Tokens: {trained_tokens}/{MAX_TOKENS}"

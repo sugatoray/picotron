@@ -91,11 +91,9 @@ class ContextComms:
         self._pending_operations = []
         if VERBOSE: print(f"RingComm | wait | STEP:{STEP} | RANK:{self.rank} | "f"ACTION:all_operations_completed", flush=True)
 
-def all_reduce_loss_across_dp_ranks(loss, device):
+def all_reduce_loss_across_pp_dp_ranks(loss, device):
     reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
-    # Reduce the loss across all workers so that every rank has the updated loss value.
-    dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.world_group)
-    reduced_loss /= pgm.process_group_manager.dp_world_size
+    dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pgm.process_group_manager.pp_dp_group)
     return reduced_loss.item()
 
 def all_reduce_gradients_across_dp_cp_ranks(model):
