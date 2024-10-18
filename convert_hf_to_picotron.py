@@ -116,11 +116,7 @@ if __name__ == "__main__":
     
     model_hf = AutoModelForCausalLM.from_pretrained(args.model_name).to(device)
    
-    model = Llama(
-        config=model_hf.config,
-        device=device,
-    )
-    
+    model = Llama(config=model_hf.config, device=device)
     picotron_to_hf = get_weights_mapping(model_hf, to_hf=True)
     
     ref_state_dict = model_hf.state_dict()
@@ -137,10 +133,7 @@ if __name__ == "__main__":
 
     torch.save(model.state_dict(), args.save_path)
 
-    new_model = Llama(
-        config=model_hf.config,
-        device=device,
-    )
+    new_model = Llama(config=model_hf.config, device=device)
     new_model.load_state_dict(torch.load(args.save_path))
 
     print("Sanity check weight ...")

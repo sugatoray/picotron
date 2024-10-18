@@ -13,7 +13,7 @@ from model import Llama
 
 def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
     if pgm.process_group_manager.pp_world_size == 1:
-        return model.forward(input_ids=batch["input_ids"], position_ids=batch["position_index"]) 
+        return model.forward(input_ids=batch["input_ids"], position_ids=batch["position_ids"], hidden_states=batch["hidden_states"]) 
     
     batch_size = batch["input_ids"].shape[0]
     seq_len = batch["input_ids"].shape[1]
@@ -28,7 +28,7 @@ def run_one_inference_step(model, batch, device, config) -> torch.Tensor:
     
     batch["hidden_states"] = None if pgm.process_group_manager.pp_is_first_stage else recv_buffer
 
-    output_tensor = model.forward(batch, device)
+    output_tensor =  model.forward(input_ids=batch["input_ids"], position_ids=batch["position_ids"], hidden_states=batch["hidden_states"])
     
     # Send output to the next stage.
     pipeline_communicate(operation="send_forward", tensor=output_tensor, dtype=torch.float32, device=device)
@@ -57,17 +57,18 @@ if __name__ == "__main__":
     setup_process_group_manager(tp_size=1, pp_size=args.pp_size, dp_size=1, cp_size=1)
     set_all_seed(seed=42)
 
-    #TODO: find a better way (should need to specify model_name + path to .pth)
-    model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
-    config = AutoConfig.from_pretrained(model_name)
+    load2name = {
+        "smollm.pth": "HuggingFaceTB/SmolLM-360M-Instruct",
+        "llama1b.pth": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "llama3-B.pth": "meta-llama/Meta-Llama-3-8B",
+    }
 
-    base_model = Llama(
-        config=config,
-        device=device,
-    )
+    config = AutoConfig.from_pretrained(load2name[args.load_path])
 
-    base_model.load_state_dict(torch.load(args.load_path))
+    base_model = Llama(config=config, device=device)
+    base_model.load_state_dict(torch.load(args.load_path,  map_location="cpu"))
     model = PipelineParallel(base_model, config).to(device)
+
     del base_model
     model.eval()
     
@@ -78,23 +79,23 @@ if __name__ == "__main__":
         "What is your favorite color?",
     ]
     
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(load2name[args.load_path])
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     
-    tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding=True).to(device=device)
+    tokenized_prompts = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
 
     for _ in range(args.max_tokens):
 
         # Create the batch
         seq_len = tokenized_prompts["input_ids"].shape[1]
-        position_index = torch.arange(seq_len).view(1, -1).to(device=device)
+        position_ids = torch.arange(seq_len).view(1, -1)
         
         batch_prompts = {
-            "input_ids": tokenized_prompts["input_ids"],
+            "input_ids": tokenized_prompts["input_ids"].to(device=device),
             "target_ids": None,
-            "position_index": position_index,
-            "attn_mask": tokenized_prompts["attention_mask"].to(dtype=torch.bool),
+            "position_ids": position_ids.to(device=device),
+            "attn_mask": tokenized_prompts["attention_mask"].to(dtype=torch.bool, device=device),
             "hidden_states": None,
         }
         

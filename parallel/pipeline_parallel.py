@@ -3,12 +3,9 @@ from distributed.distributed_primtives import pipeline_communicate, bidirectiona
 import torch, torch.nn as nn, torch.nn.functional as F
 import torch.distributed as dist
 
-from parallel.base_parallel import BaseParallel
-
-class PipelineParallel(BaseParallel):
+class PipelineParallel(nn.Module):
     def __init__(self, model, config):
-        super().__init__(model, config)
-        #TODO(fmom): find a better model to distributed layers without instantiating a base_model first
+        super().__init__()
         layer_distribution = self.distribute_layers(config.num_hidden_layers)
         self.embedding = model.embedding if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
         self.decoder_layers = nn.ModuleDict({str(i): model.decoder_layers[i] for i in layer_distribution})
@@ -20,11 +17,11 @@ class PipelineParallel(BaseParallel):
         start_layer = sum(layers_per_gpu[:pgm.process_group_manager.pp_rank])
         return list(range(start_layer, start_layer + layers_per_gpu[pgm.process_group_manager.pp_rank]))
 
-    def forward(self, batch, device):
-        x = batch["hidden_states"].to(device) if batch["hidden_states"] is not None else batch["input_ids"].to(device)
+    def forward(self, input_ids, position_ids, hidden_states):
+        x = hidden_states if hidden_states is not None else input_ids
         x = self.embedding(x)
         for layer in self.decoder_layers.values():
-            x = layer(x, position_ids=batch["position_index"].to(device))
+            x = layer(x, position_ids=position_ids)
         x = self.final_norm(x)
         return self.final_proj(x)
 
@@ -41,9 +38,9 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device):
     
     for _ in range(data_loader.num_local_micro_batches): # All forward passes
         input_tensor = pipeline_communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=torch.float32)
-        batch = next(iter(data_loader))
-        batch["hidden_states"] = input_tensor
-        output_tensor = model.forward(batch, device)
+        batch = next(data_loader)
+        batch["hidden_states"] = input_tensor.to(device) if input_tensor is not None else input_tensor
+        output_tensor = model.forward(input_ids=batch["input_ids"].to(device), position_ids=batch["position_ids"].to(device), hidden_states=batch["hidden_states"])
         pipeline_communicate(operation='send_forward', tensor=output_tensor, device=device, dtype=torch.float32)
         
         # Don't need to keep track of the loss on every rank. Just choosing a single rank (TP rank 0 in the last PP stage) is enough
@@ -69,9 +66,9 @@ def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device):
     logging_loss, input_tensors, output_tensors  = 0.0, [], []
     
     def _forward_step(input_tensor):
-        batch = next(iter(data_loader))
-        batch["hidden_states"] = input_tensor
-        output_tensor = model.forward(batch, device)
+        batch = next(data_loader)
+        batch["hidden_states"] = input_tensor.to(device) if input_tensor is not None else input_tensor
+        output_tensor = model.forward(input_ids=batch["input_ids"].to(device), position_ids=batch["position_ids"].to(device), hidden_states=batch["hidden_states"])
         # Don't need to keep track of the loss on every rank. Just choosing a single rank (TP rank 0 in the last PP stage) is enough
         if pgm.process_group_manager.pp_is_last_stage and pgm.process_group_manager.global_rank == pgm.process_group_manager.tp_first_rank:
             output_tensor = F.cross_entropy(output_tensor.transpose(1, 2), batch["target_ids"].to(device), reduction='mean')
