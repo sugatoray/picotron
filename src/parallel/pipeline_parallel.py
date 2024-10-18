@@ -1,7 +1,6 @@
-import distributed.process_group_manager as pgm
-from distributed.distributed_primtives import pipeline_communicate, bidirectional_pipeline_communicate, all_reduce_loss_across_dp_ranks
+import src.distributed.process_group_manager as pgm
+from src.distributed.distributed_primtives import pipeline_communicate, bidirectional_pipeline_communicate, all_reduce_loss_across_dp_ranks
 import torch, torch.nn as nn, torch.nn.functional as F
-import torch.distributed as dist
 
 class PipelineParallel(nn.Module):
     def __init__(self, model, config):

@@ -4,11 +4,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributed as dist
 from typing import Any, Optional, Tuple
-from distributed.distributed_primtives import ContextComms
+from src.distributed.distributed_primtives import ContextComms
 from model import Attention
-import distributed.process_group_manager as pgm
+import src.distributed.process_group_manager as pgm
 
-from parallel.base_parallel import BaseParallel
+from src.parallel.base_parallel import BaseParallel
 
 class ContextParallel(BaseParallel):
     def __init__(self, model, config):

@@ -1,4 +1,13 @@
+"""Training script for LLaMA model.
+torchrun --nproc_per_node 1 --master_addr localhost --master_port 25500 train.py --use_wandb
+torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --tp_size 2 
+torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 2
+torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 1 --dp_size 2
+CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --tp_size 2
+CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
 #VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
+"""
+
 import os
 import numpy as np
 import torch.nn.functional as F
@@ -9,14 +18,15 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader, DistributedSampler
 from datasets import load_dataset,Features, Sequence, Value
 import argparse
-
-import distributed.process_group_manager as pgm
-from distributed.distributed_primtives import all_reduce_gradients_across_dp_cp_ranks
+from datasets import Features, Sequence, Value
+import numpy as np
+from src.parallel.tensor_parallel.tensor_parallel import TensorParallel
+import src.distributed.process_group_manager as pgm
 from utils import set_all_seed, print
-from distributed.process_group_manager import setup_process_group_manager
-from parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
-from parallel.data_parallel import DataParallel
-from parallel.context_parallel import ContextParallel
+from src.distributed.process_group_manager import setup_process_group_manager
+from src.parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
+from src.parallel.data_parallel.data_parallel_bucket import DataParallel
+from src.parallel.context_parallel import ContextParallel
 from model import Llama
 import wandb
 
@@ -110,6 +120,21 @@ class MicroBatchDataLoader(DataLoader):
             "attn_mask": attn_mask,
             "hidden_states": None
         }
+        
+    def __iter__(self):
+        if self._iterator is None:
+            self._iterator = super().__iter__()
+        return self
+
+    def __next__(self):
+        if self._iterator is None:
+            self._iterator = super().__iter__()
+        try:
+            batch = next(self._iterator)
+        except StopIteration:
+            self._iterator = None
+            raise StopIteration
+        return batch
 
     def __iter__(self):
         if self._iterator is None:
@@ -127,27 +152,28 @@ class MicroBatchDataLoader(DataLoader):
         return batch
 
 def train_step(model, data_loader, device):
-    total_loss = 0.0
+    acc_loss = 0.0
+    
+    # get the next batch
+    batch = next(data_loader)
+    input_ids = batch["input_ids"].to(device)
+    target_ids = batch["target_ids"].to(device)
+    
+    for i in range(data_loader.grad_acc):
+        outputs = model(input_ids=input_ids)
 
-    for _ in range(data_loader.num_local_micro_batches):
-        batch = next(data_loader)
-
-        input_ids = batch["input_ids"].to(device)
-        position_ids = batch["position_ids"].to(device)
-        target_ids = batch["target_ids"].to(device)
-
+        # compute the loss
         batch_size, seq_len = input_ids.shape
-
-        outputs = model(input_ids=input_ids, position_ids=position_ids)
-
-        loss = F.cross_entropy(outputs.view(batch_size * seq_len, -1), target_ids.view(-1), reduction="mean")
-
+        target_ids = target_ids.reshape(-1)
+        outputs = outputs.view(seq_len*batch_size, -1)
+        loss = F.cross_entropy(outputs, target_ids, reduction='mean')
+        
         loss.backward()
 
-        total_loss += loss.item()
+        acc_loss += loss.item()
+    acc_loss /= data_loader.grad_acc
 
-    avg_loss = total_loss / data_loader.num_local_micro_batches
-    return avg_loss
+    return acc_loss
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -171,7 +197,10 @@ if __name__ == "__main__":
     host = os.environ["MASTER_ADDR"]
     port = int(os.environ["MASTER_PORT"])
     
-    SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 4, 1, 3e-4, int(1e4), 1e6, 42
+    # SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 10, 6, 2, 1e-4, 20, 1800, 42
+    ## hyperparameters
+    SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 16, 4, 3e-4, 100000, int(10e8), 42
+    grad_acc = 16
 
     assert SEQ_LEN % args.cp_size == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
 
@@ -192,14 +221,13 @@ if __name__ == "__main__":
     
     set_all_seed(SEED)
 
-    load2name = {
-        "smollm.pth": "HuggingFaceTB/SmolLM-360M-Instruct",
-        "llama1b.pth": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "llama3-B.pth": "meta-llama/Meta-Llama-3-8B",
-    }
-
     dataset_name = "roneneldan/TinyStories"
-    config = AutoConfig.from_pretrained(load2name[args.load_path])
+    model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
+    config = AutoConfig.from_pretrained(model_name)
+    config.num_attention_heads = 16
+    config.num_key_value_heads = 4
+
+    model = Llama(config=config)
     
     if pgm.process_group_manager.global_rank == 0 and args.use_wandb:
         wandb.init(
@@ -209,7 +237,7 @@ if __name__ == "__main__":
                 "tensor_parallel_size": pgm.process_group_manager.tp_size,
                 "pipeline_parallel_size": pgm.process_group_manager.pp_size,
                 "data_parallel_size": pgm.process_group_manager.dp_size,
-                "model": load2name[args.load_path],
+                "model": model_name,
                 "dataset": dataset_name,
                 "max_tokens": MAX_TOKENS,
                 "learning_rate": LEARNING_RATE,
@@ -218,33 +246,29 @@ if __name__ == "__main__":
                 "global_batch_size": GLOBAL_BATCH_SIZE,
             },
         )
-    
-    config = AutoConfig.from_pretrained(load2name[args.load_path])
 
-    model = Llama(config=config, device=device)
+    if pgm.process_group_manager.tp_world_size > 1:
+        TensorParallel(model)
 
-    # model.load_state_dict(torch.load(args.load_path, map_location="cpu"))
-
-    # if pgm.process_group_manager.tp_world_size > 1:
-        # model = TensorParallel(model, config).to(device)
-
-    if pgm.process_group_manager.cp_size > 1:
-        model = ContextParallel(model, config).to(device)
+    # if pgm.process_group_manager.cp_size > 1:
+        #TODO: do at the very end when we have fix convergence issue
+        # model = ContextParallel(model, config)
 
     if pgm.process_group_manager.pp_world_size > 1:
-        model = PipelineParallel(model, config).to(device)
+        model = PipelineParallel(model, config)
     
     if pgm.process_group_manager.dp_world_size > 1:
-        model = DataParallel(model, config).to(device)
+        model = DataParallel(model)
 
+    model.to(device)
     model.train()
     
-    data_loader = MicroBatchDataLoader(global_batch_size=GLOBAL_BATCH_SIZE, micro_batch_size=MICRO_BATCH_SIZE, seq_length=SEQ_LEN, dataset_name=dataset_name, tokenizer_name=load2name[args.load_path], num_workers=4, num_proc=4, num_samples=NUM_SAMPLES)
+    data_loader = MicroBatchDataLoader(global_batch_size=GLOBAL_BATCH_SIZE, micro_batch_size=MICRO_BATCH_SIZE, seq_length=SEQ_LEN, dataset_name=dataset_name, tokenizer_name=model_name, num_workers=4, num_proc=4, num_samples=NUM_SAMPLES)
     tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, config.hidden_size)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     
     trained_tokens, step = 0, 0
-    tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN
+    tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN * grad_acc
 
     dist.barrier()
 
@@ -262,19 +286,31 @@ if __name__ == "__main__":
         
         if pgm.process_group_manager.pp_world_size > 1:
             loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device)
-            # loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device)
         else:
             loss = train_step(model, data_loader, device)
-
+        
+        # average the loss across all DP/CP ranks
         if pgm.process_group_manager.dp_world_size > 1 or pgm.process_group_manager.cp_world_size > 1:
-            all_reduce_gradients_across_dp_cp_ranks(model)
-
+            #TODO: use all_reduce function from distributed_primitives.py
+            loss_tensor = torch.tensor([loss], dtype=torch.float32, device=device)
+            handle = dist.all_reduce(loss_tensor, group=pgm.process_group_manager.cp_dp_group, async_op=True, op=dist.ReduceOp.AVG)
+        
         optimizer.step()
         trained_tokens += tokens_per_step
         step += 1
         
+        # In DDP implementation I need to reset the gradient buffers
+        if hasattr(model, 'reset'):
+            model.reset()
+        
         if pgm.process_group_manager.global_rank == 0:
-            print(f"[rank {pgm.process_group_manager.global_rank}] Step: {step}, Loss: {loss:.4f}, Tokens: {trained_tokens}/{MAX_TOKENS}")
+            if pgm.process_group_manager.dp_world_size > 1 or pgm.process_group_manager.cp_world_size > 1:
+                handle.wait()
+                loss = loss_tensor.item()
+            print(f"[rank {pgm.process_group_manager.global_rank}] Step: {step}, Loss: {loss:.4f}, "
+                f"Global batch size: {tokens_per_step}, "
+                f"Tokens: {trained_tokens}/{MAX_TOKENS}"
+                )
         
         if pgm.process_group_manager.global_rank == 0 and args.use_wandb:
             wandb.log({"loss": loss, "trained_tokens": trained_tokens})
