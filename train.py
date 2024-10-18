@@ -1,8 +1,9 @@
 """Training script for LLaMA model.
-torchrun --nproc_per_node 1 --master_addr localhost --master_port 25500 train.py
+torchrun --nproc_per_node 1 --master_addr localhost --master_port 25500 train.py --use_wandb
+torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --tp_size 2 
 torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 2
 torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 1 --dp_size 2
-CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=1 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py
+CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --tp_size 2
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
 #VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
 """
@@ -19,25 +20,26 @@ from datasets import load_dataset
 import argparse
 from datasets import Features, Sequence, Value
 import numpy as np
+from src.parallel.tensor_parallel.tensor_parallel import TensorParallel
 import src.distributed.process_group_manager as pgm
 from utils import set_all_seed, print
 from src.distributed.process_group_manager import setup_process_group_manager
 from src.parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
-from dataclasses import dataclass
 from src.parallel.data_parallel.data_parallel_bucket import DataParallel
-from src.parallel.context_parallel import ContextParallel
+# from src.parallel.context_parallel import ContextParallel
 from model import LLaMA
 import wandb
 import multiprocessing
 
 class MicroBatchDataLoader(DataLoader):
-    def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, split="train", num_samples=None, num_workers=0):
+    def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, grad_acc = 1, split="train", num_samples=None, num_workers=0):
         self.global_batch_size = global_batch_size
         self.micro_batch_size = micro_batch_size
         self.seq_length = seq_length
         self.local_batch_size = self.global_batch_size // pgm.process_group_manager.dp_world_size # each DP rank gets a local batch
         self.num_local_micro_batches = self.local_batch_size // self.micro_batch_size
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
+        self.grad_acc = grad_acc
         
         self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
 
@@ -137,17 +139,19 @@ def train_step(model, data_loader, device):
     input_ids = batch["input_ids"].to(device)
     target_ids = batch["target_ids"].to(device)
     
-    outputs = model(input_ids=input_ids)
+    for i in range(data_loader.grad_acc):
+        outputs = model(input_ids=input_ids)
 
-    # compute the loss
-    batch_size, seq_len = input_ids.shape
-    target_ids = target_ids.reshape(-1)
-    outputs = outputs.view(seq_len*batch_size, -1)
-    loss = F.cross_entropy(outputs, target_ids, reduction='mean')
-    
-    loss.backward()
+        # compute the loss
+        batch_size, seq_len = input_ids.shape
+        target_ids = target_ids.reshape(-1)
+        outputs = outputs.view(seq_len*batch_size, -1)
+        loss = F.cross_entropy(outputs, target_ids, reduction='mean')
+        
+        loss.backward()
 
-    acc_loss += loss.item()
+        acc_loss += loss.item()
+    acc_loss /= data_loader.grad_acc
 
     return acc_loss
 
@@ -175,6 +179,7 @@ if __name__ == "__main__":
     # SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 10, 6, 2, 1e-4, 20, 1800, 42
     ## hyperparameters
     SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 16, 4, 3e-4, 100000, int(10e8), 42
+    grad_acc = 16
 
     assert SEQ_LEN % args.cp_size == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
 
@@ -197,10 +202,12 @@ if __name__ == "__main__":
     dataset_name = "roneneldan/TinyStories"
     model_name = "HuggingFaceTB/SmolLM-360M-Instruct"
     config = AutoConfig.from_pretrained(model_name)
+    config.num_attention_heads = 16
+    config.num_key_value_heads = 4
 
     model = LLaMA(
         config=config
-    ).to(device)
+    )
     
     if pgm.process_group_manager.global_rank == 0 and args.use_wandb:
         wandb.init(
@@ -220,8 +227,11 @@ if __name__ == "__main__":
             },
         )
 
-    if pgm.process_group_manager.cp_size > 1:
-        model = ContextParallel(model, config)
+    if pgm.process_group_manager.tp_world_size > 1:
+        TensorParallel(model)
+
+    # if pgm.process_group_manager.cp_size > 1:
+    #     model = ContextParallel(model, config)
 
     if pgm.process_group_manager.pp_world_size > 1:
         model = PipelineParallel(model, config)
@@ -229,17 +239,15 @@ if __name__ == "__main__":
     if pgm.process_group_manager.dp_world_size > 1:
         model = DataParallel(model, pgm.process_group_manager.dp_group)
 
-    # if pgm.process_group_manager.tp_world_size > 1:
-        # model = TensorParallel(model, config)
-
+    model.to(device)
     model.train()
     
-    data_loader = MicroBatchDataLoader(GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, SEQ_LEN, dataset_name, model_name, num_samples=NUM_SAMPLES)
+    data_loader = MicroBatchDataLoader(GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, SEQ_LEN, dataset_name, model_name, grad_acc = grad_acc, num_samples=NUM_SAMPLES)
     tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, config.hidden_size)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     
     trained_tokens, step = 0, 0
-    tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN
+    tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN * grad_acc
 
     dist.barrier()
 

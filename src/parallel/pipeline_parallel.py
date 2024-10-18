@@ -3,7 +3,7 @@ from src.distributed.distributed_primtives import pipeline_communicate, bidirect
 import torch, torch.nn as nn, torch.nn.functional as F
 import torch.distributed as dist
 
-from parallel.base_parallel import BaseParallel
+from src.parallel.base_parallel import BaseParallel
 
 class PipelineParallel(BaseParallel):
     def __init__(self, model, config):

@@ -5,6 +5,8 @@ import torch.nn.functional as F
 import torch.nn.init as init
 from flash_attn.flash_attn_interface import flash_attn_func
 from flash_attn.layers.rotary import apply_rotary_emb
+import src.distributed.process_group_manager as pgm
+from src.parallel.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
@@ -56,13 +58,13 @@ class CausalSelfAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_key_values = config.num_key_value_heads
         self.head_dim = self.hidden_size//self.num_heads
-        # model_parallel_size = get_model_parallel_world_size()
-        model_parallel_size = 1
+        model_parallel_size = pgm.process_group_manager.tp_world_size
         self.num_local_heads = config.num_attention_heads // model_parallel_size # TP parallelism
         self.num_local_kv_heads = config.num_key_value_heads // model_parallel_size # TP parallelism
         self.is_merged_qkv_weight = os.getenv('MERGED_QKV_WEIGHT', '1')
         if self.is_merged_qkv_weight  == '1': 
             self.qkv_proj = nn.Linear(config.hidden_size, self.num_heads*self.head_dim + 2*self.num_key_values*self.head_dim, bias=False)
+            # self.qkv_proj = ColumnParallelLinear(config.hidden_size, self.num_heads*self.head_dim + 2*self.num_key_values*self.head_dim, bias=False, gather_output=False, init_method=init_method)
         else:
             self.q_proj = nn.Linear(config.hidden_size, self.num_heads*self.head_dim, bias=False)
             self.k_proj = nn.Linear(config.hidden_size, self.num_key_values*self.head_dim, bias=False)
@@ -134,11 +136,12 @@ class LLaMAMLP(nn.Module):
         self.merged_gate_up = os.getenv('MERGED_GATE_UP_WEIGHT', '1') == '1'
         if self.merged_gate_up:
             self.gate_up_proj = nn.Linear(config.hidden_size, config.intermediate_size*2, bias=False)
+            # self.gate_up_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size*2, bias=False, gather_output=False, init_method=init_method)
         else:
-            self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-            self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-            # self.up_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False, init_method=init_method)
-            # self.gate_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False, init_method=init_method)
+            # self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+            # self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+            self.up_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False, init_method=init_method)
+            self.gate_proj = ColumnParallelLinear(config.hidden_size, config.intermediate_size, bias=False, gather_output=False, init_method=init_method)
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
         # self.down_proj = RowParallelLinear(config.intermediate_size, config.hidden_size, bias=False, input_is_parallel=True, init_method=init_method)
         
