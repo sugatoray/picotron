@@ -3,7 +3,7 @@ torchrun --nproc_per_node 1 --master_addr localhost --master_port 25500 train.py
 torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --tp_size 2 
 torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 2
 torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 1 --dp_size 2
-CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --tp_size 2
+CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --pp_size 2
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
 #VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
 """
@@ -29,7 +29,7 @@ from src.parallel.data_parallel.data_parallel_bucket import DataParallel
 from src.parallel.context_parallel import ContextParallel
 from model import Llama
 import wandb
-from src.distributed.distributed_primtives import all_reduce_loss_across_pp_dp_ranks
+from src.distributed.distributed_primtives import all_reduce_loss_across_dp_ranks
 
 class MicroBatchDataLoader(DataLoader):
     def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc=1, split="train", num_samples=None):
@@ -177,8 +177,11 @@ if __name__ == "__main__":
     
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    os.environ["FLASH_ATTEN"] = "1" # Use operations from  flash attention repo to accelerate the training. Model dtpe should be torch.float16!
- 
+    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+    os.environ["DTYPE"] = "bfloat16" if dtype == torch.bfloat16 else "float32"
+    os.environ["FLASH_ATTEN"] = "1" # Use cuda kernels from flash attention repo to accelerate the training. Model dtype should be torch.float16!
+    assert (dtype == torch.bfloat16 and os.getenv("FLASH_ATTEN") == "1") or os.getenv("FLASH_ATTEN") != "1", "Kernel operations requires dtype=torch.bfloat16"
+
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     host = os.environ["MASTER_ADDR"]
@@ -186,9 +189,8 @@ if __name__ == "__main__":
     
     # SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 10, 6, 2, 1e-4, 20, 1800, 42
     ## hyperparameters
-    SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 32, 4, 3e-4, 100000, int(10e8), 42
+    SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 16, 4, 3e-4, 100000, int(10e8), 42
     grad_acc = 16
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
 
     assert SEQ_LEN % args.cp_size == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
 
@@ -277,7 +279,7 @@ if __name__ == "__main__":
         else:
             loss = train_step(model, data_loader, device)
         
-        loss = all_reduce_loss_across_pp_dp_ranks(loss, device)
+        loss = all_reduce_loss_across_dp_ranks(loss, device)
 
         optimizer.step()
         trained_tokens += tokens_per_step
@@ -287,7 +289,7 @@ if __name__ == "__main__":
         if hasattr(model, 'reset'):
             model.reset()
         
-        if pgm.process_group_manager.global_rank == 0:
+        if pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.pp_is_last_stage:
             print(f"[rank {pgm.process_group_manager.global_rank}] Step: {step}, Loss: {loss:.4f}, "
                 f"Global batch size: {tokens_per_step}, "
                 f"Tokens: {trained_tokens}/{MAX_TOKENS}"
