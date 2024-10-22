@@ -234,7 +234,7 @@ if __name__ == "__main__":
         )
 
     if pgm.process_group_manager.tp_world_size > 1:
-        model = TensorParallel(model)
+        TensorParallel(model)
 
     # if pgm.process_group_manager.cp_size > 1:
         #TODO: do at the very end when we have fix convergence issue
@@ -249,7 +249,7 @@ if __name__ == "__main__":
     model.to(device)
     model.train()
     
-    data_loader = MicroBatchDataLoader(global_batch_size=GLOBAL_BATCH_SIZE, micro_batch_size=MICRO_BATCH_SIZE, seq_length=SEQ_LEN, dataset_name=dataset_name, tokenizer_name=model_name, num_workers=4, num_proc=4, num_samples=NUM_SAMPLES)
+    data_loader = MicroBatchDataLoader(global_batch_size=GLOBAL_BATCH_SIZE, micro_batch_size=MICRO_BATCH_SIZE, seq_length=SEQ_LEN, dataset_name=dataset_name, tokenizer_name=model_name, grad_acc = grad_acc,num_workers=4, num_proc=4, num_samples=NUM_SAMPLES)
     tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, config.hidden_size)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     

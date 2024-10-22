@@ -2,11 +2,9 @@ from src.parallel.tensor_parallel.layers import ColumnParallelLinear, RowParalle
 import torch.nn.init as init
 import torch.nn as nn
 
-class TensorParallel(nn.Module):
+class TensorParallel():
     def __init__(self, model, init_method = init.xavier_normal_):
         super().__init__()
-
-        self.model = model
 
         module_linear_name_stype_mapping_list = [
             ("attention", "q_proj", "column"),
@@ -51,9 +49,3 @@ class TensorParallel(nn.Module):
                 init_method=self.init_method
             )
         setattr(module, linear_proj_name, new_linear_layer)
-    
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.model, name)
