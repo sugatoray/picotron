@@ -19,6 +19,18 @@ def set_all_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
     
+def to_readable_format(num, precision=2):
+    if num >= 1e12:
+        return f"{num / 1e12:.{precision}f}T"
+    elif num >= 1e9:
+        return f"{num / 1e9:.{precision}f}B"
+    elif num >= 1e6:
+        return f"{num / 1e6:.{precision}f}M"
+    elif num >= 1e3:
+        return f"{num / 1e3:.{precision}f}K"
+    else:
+        return f"{num:.{precision}f}"
+
 ## def display_4D_parallelism_grid():
 #    #TODO(fmom): fix me
 #    #TODO(fmom): add color to distinguish between different parallelism groups
