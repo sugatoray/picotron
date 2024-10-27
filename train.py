@@ -1,9 +1,9 @@
 """Training script for LLaMA model.
 torchrun --nproc_per_node 1 --master_addr localhost --master_port 25500 train.py --use_wandb
-torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --tp_size 4 
-torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 2
-torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --pp_size 1 --dp_size 2
-CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --pp_size 2
+torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --tp_size 2 --use_wandb
+torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --tp_size 2 --pp_size 2 --use_wandb
+torchrun --nproc_per_node 8 --master_addr localhost --master_port 25500 train.py --tp_size 2 --dp_size 2 --pp_size 2 --use_wandb
+CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --tp_size 2 --pp_size 2
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
 #VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
 """
@@ -203,9 +203,10 @@ if __name__ == "__main__":
     
     # SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 10, 6, 2, 1e-4, 20, 1800, 42
     ## hyperparameters
-    SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 32, 1, 3e-4, 100000, int(10e8), 42
-    grad_acc = 16
-
+    SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 128, 32, 3e-4, 200000, None, 42
+    total_train_steps = 200
+    grad_acc = 1
+    
     assert SEQ_LEN % args.cp_size == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
 
     backend = "gloo" if args.use_cpu else "nccl"
@@ -223,6 +224,9 @@ if __name__ == "__main__":
     # if pgm.process_group_manager.global_rank == 0:
         # display_4D_parallelism_grid()
     
+    tokens_per_step = GLOBAL_BATCH_SIZE * SEQ_LEN * grad_acc * args.dp_size
+    if pgm.process_group_manager.global_rank == 0:
+        print("Tokens per step:", to_readable_format(tokens_per_step))
     set_all_seed(SEED)
 
     dataset_name = "roneneldan/TinyStories"
@@ -233,12 +237,15 @@ if __name__ == "__main__":
     config.num_attention_heads = 16
     config.num_key_value_heads = 4
 
+    start_time = time.time()
     model = Llama(config=config)
+    print("init model time:", time.time()-start_time)
     
-    if pgm.process_group_manager.global_rank == 0 and args.use_wandb:
+    wandb_rank = pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.pp_is_last_stage
+    if wandb_rank and args.use_wandb:
         wandb.init(
             project="picotron",
-            name=f"test_convergence_{pgm.process_group_manager}",
+            name=f"test_convergence_GBS_{tokens_per_step}_{pgm.process_group_manager}",
             config={
                 "tensor_parallel_size": pgm.process_group_manager.tp_size,
                 "pipeline_parallel_size": pgm.process_group_manager.pp_size,
@@ -253,6 +260,7 @@ if __name__ == "__main__":
             },
         )
 
+    start_time = time.time()
     if pgm.process_group_manager.tp_world_size > 1:
         TensorParallel(model)
 
@@ -265,16 +273,19 @@ if __name__ == "__main__":
     
     if pgm.process_group_manager.dp_world_size > 1:
         model = DataParallel(model)
-
+    print("init parallel time:", time.time()-start_time)
+    start_time = time.time()
     model.to(dtype).to(device)
     model.train()
+    print("model to device time:", time.time()-start_time)
     
+    start_time = time.time()
     data_loader = MicroBatchDataLoader(global_batch_size=GLOBAL_BATCH_SIZE, micro_batch_size=MICRO_BATCH_SIZE, seq_length=SEQ_LEN, dataset_name=dataset_name, tokenizer_name=model_name, grad_acc = grad_acc,num_workers=4, num_proc=4, num_samples=NUM_SAMPLES)
+    print("init dataloader time:", time.time()-start_time)
     tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, config.hidden_size)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     
     trained_tokens, step = 0, 0
-    tokens_per_step = data_loader.num_global_micro_batches * data_loader.micro_batch_size * SEQ_LEN * grad_acc
 
     dist.barrier()
 
@@ -284,7 +295,7 @@ if __name__ == "__main__":
     #TODO: Add activation checkpointing
     #TODO: add gradient accumulation
     
-    while trained_tokens < MAX_TOKENS:        
+    while MAX_TOKENS is None or trained_tokens < MAX_TOKENS:
         #TODO: Add epoch support
         # data_loader.set_epoch(step)
         step_start_time = time.time()
@@ -307,18 +318,23 @@ if __name__ == "__main__":
 
         step_duration = time.time() - step_start_time
         
-        if pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.pp_is_last_stage:
+        if wandb_rank:
             print(f"[rank {pgm.process_group_manager.global_rank}] Step: {step}, Loss: {loss:.4f}, "
                 f"Global batch size: {to_readable_format(tokens_per_step)}, "
                 f"Tokens/s: {to_readable_format(tokens_per_step / step_duration)}, "
                 f"Tokens/s/GPU: {to_readable_format(tokens_per_step / step_duration / world_size)}, "
-                f"Tokens: {to_readable_format(trained_tokens)}/{to_readable_format(MAX_TOKENS)}"
+                f"Tokens: {to_readable_format(trained_tokens)}{('/' + to_readable_format(MAX_TOKENS)) if MAX_TOKENS else ''}, "
+                f"Memory usage: {torch.cuda.memory_reserved() / 1e9:.2f}GB"
             )
         
-        if pgm.process_group_manager.global_rank == 0 and args.use_wandb:
-            wandb.log({"loss": loss, "trained_tokens": trained_tokens})
+            if args.use_wandb:
+                wandb.log({"loss": loss, "tokens_per_step": tokens_per_step, "tokens_per_second": tokens_per_step / step_duration,\
+                    "memory_usage": torch.cuda.memory_reserved() / 1e9, "trained_tokens": trained_tokens})
+        
+        if step >= total_train_steps:
+            break
     
-    if pgm.process_group_manager.global_rank == 0 and args.use_wandb:
+    if wandb_rank and args.use_wandb:
         wandb.finish()
 
     dist.destroy_process_group()
