@@ -1,9 +1,10 @@
-from src.parallel.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
+from functools import partial
+from src.parallel.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding, initialize_weight_tensor
 import torch.nn.init as init
 import torch.nn as nn
 
 class TensorParallel():
-    def __init__(self, model, init_method = init.xavier_normal_):
+    def __init__(self, model, init_method = initialize_weight_tensor):
         super().__init__()
 
         module_linear_name_stype_mapping_list = [
@@ -46,6 +47,6 @@ class TensorParallel():
             new_linear_layer = VocabParallelEmbedding(
                 num_embeddings=linear_layer.num_embeddings,
                 embedding_dim=linear_layer.embedding_dim,
-                init_method=self.init_method
+                init_method=partial(self.init_method, vocab_embedding=True)
             )
         setattr(module, linear_proj_name, new_linear_layer)
