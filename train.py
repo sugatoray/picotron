@@ -1,7 +1,8 @@
 """Training script for LLaMA model.
 torchrun --nproc_per_node 1 --master_addr localhost --master_port 25500 train.py --use_wandb
 torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --tp_size 2 --use_wandb
-torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --tp_size 2 --pp_size 2 --use_wandb
+torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --tp_size 2 --pp_size 2 --use_wandb 
+torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --tp_size 2 --pp_size 2 --load_path ckpt/150
 torchrun --nproc_per_node 8 --master_addr localhost --master_port 25500 train.py --tp_size 2 --dp_size 2 --pp_size 2 --use_wandb
 CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --tp_size 2 --pp_size 2
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
@@ -24,7 +25,7 @@ from datasets import Features, Sequence, Value
 import numpy as np
 from src.parallel.tensor_parallel.tensor_parallel import TensorParallel
 import src.distributed.process_group_manager as pgm
-from utils import set_all_seed, print, to_readable_format
+from utils import set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint
 from src.distributed.process_group_manager import setup_process_group_manager
 from src.parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from src.parallel.data_parallel.data_parallel_bucket import DataParallel
@@ -185,7 +186,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_cpu", action="store_true", default=False)
     parser.add_argument("--master_addr", type=str, default="localhost")
     parser.add_argument("--master_port", type=int, default=29500)
-    parser.add_argument("--load_path", type=str, default="smollm.pth")
+    parser.add_argument("--load_path", type=str, default="", help="Path to load the model from")
+    parser.add_argument("--ckpt_dir", type=str, default="ckpt", help="Directory to save checkpoints")
+    parser.add_argument("--ckpt_freq", type=int, default=50, help="Frequency to save checkpoints")
     
     args = parser.parse_args()
     
@@ -286,6 +289,11 @@ if __name__ == "__main__":
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     
     trained_tokens, step = 0, 0
+    if args.load_path:
+        step, trained_tokens = load_checkpoint(model, optimizer, args.load_path)
+    
+    checkpoint_dir = args.ckpt_dir
+    checkpoint_freq = args.ckpt_freq
 
     dist.barrier()
 
@@ -331,7 +339,10 @@ if __name__ == "__main__":
                 wandb.log({"loss": loss, "tokens_per_step": tokens_per_step, "tokens_per_second": tokens_per_step / step_duration,\
                     "memory_usage": torch.cuda.memory_reserved() / 1e9, "trained_tokens": trained_tokens})
         
-        if step >= total_train_steps:
+        if step % checkpoint_freq == 0:
+            save_checkpoint(model, optimizer, step, trained_tokens, checkpoint_dir+f"/{step}")
+        
+        if step > total_train_steps:
             break
     
     if wandb_rank and args.use_wandb:
