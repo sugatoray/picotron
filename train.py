@@ -1,6 +1,6 @@
 """Training script for LLaMA model.
 torchrun --nproc_per_node 1 --master_addr localhost --master_port 25500 train.py --use_wandb
-torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --tp_size 2 --use_wandb
+torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --dp_size 2 --use_wandb
 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --tp_size 2 --pp_size 2 --use_wandb 
 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --tp_size 2 --pp_size 2 --load_path ckpt/150
 torchrun --nproc_per_node 8 --master_addr localhost --master_port 25500 train.py --tp_size 2 --dp_size 2 --pp_size 2 --use_wandb
@@ -35,11 +35,11 @@ import wandb
 from src.distributed.distributed_primtives import all_reduce_loss_across_dp_ranks
 
 class MicroBatchDataLoader(DataLoader):
-    def __init__(self, global_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc=1, split="train", num_samples=None):
-        self.global_batch_size = global_batch_size
+    def __init__(self, local_batch_size, micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc=1, split="train", num_samples=None):
+        self.global_batch_size = local_batch_size * pgm.process_group_manager.dp_world_size
         self.micro_batch_size = micro_batch_size
         self.seq_length = seq_length
-        self.local_batch_size = self.global_batch_size // pgm.process_group_manager.dp_world_size # each DP rank gets a local batch
+        self.local_batch_size = local_batch_size
         self.num_local_micro_batches = self.local_batch_size // self.micro_batch_size
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
         self.grad_acc = grad_acc
@@ -155,24 +155,28 @@ class MicroBatchDataLoader(DataLoader):
 def train_step(model, data_loader, device):
     acc_loss = 0.0
     
-    # get the next batch
-    batch = next(data_loader)
-    input_ids = batch["input_ids"].to(device)
-    target_ids = batch["target_ids"].to(device)
-    
+    ddp = pgm.process_group_manager.dp_world_size > 1
     for i in range(data_loader.grad_acc):
+        # get the next batch
+        batch = next(data_loader)
+        input_ids = batch["input_ids"].to(device)
+        target_ids = batch["target_ids"].to(device)
+
+        # disable gradient synchronization for all but the last micro-batch
+        if ddp:
+            model.require_backward_grad_sync = (i == data_loader.grad_acc - 1)
+
         outputs = model(input_ids=input_ids)
 
         # compute the loss
         batch_size, seq_len = input_ids.shape
         target_ids = target_ids.reshape(-1)
         outputs = outputs.view(seq_len*batch_size, -1)
-        loss = F.cross_entropy(outputs, target_ids, reduction='mean')
+        loss = F.cross_entropy(outputs, target_ids, reduction='mean') / data_loader.grad_acc
         
         loss.backward()
 
         acc_loss += loss.item()
-    acc_loss /= data_loader.grad_acc
 
     return acc_loss
 
@@ -188,7 +192,7 @@ if __name__ == "__main__":
     parser.add_argument("--master_port", type=int, default=29500)
     parser.add_argument("--load_path", type=str, default="", help="Path to load the model from")
     parser.add_argument("--ckpt_dir", type=str, default="ckpt", help="Directory to save checkpoints")
-    parser.add_argument("--ckpt_freq", type=int, default=50, help="Frequency to save checkpoints")
+    parser.add_argument("--ckpt_freq", type=int, default=300, help="Frequency to save checkpoints")
     
     args = parser.parse_args()
     
@@ -204,11 +208,10 @@ if __name__ == "__main__":
     host = os.environ["MASTER_ADDR"]
     port = int(os.environ["MASTER_PORT"])
     
-    # SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 10, 6, 2, 1e-4, 20, 1800, 42
     ## hyperparameters
-    SEQ_LEN, GLOBAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 128, 32, 3e-4, 200000, None, 42
+    SEQ_LEN, LOCAL_BATCH_SIZE, MICRO_BATCH_SIZE, LEARNING_RATE, NUM_SAMPLES, MAX_TOKENS, SEED = 1024, 64, 32, 3e-4, 400000, None, 42
     total_train_steps = 200
-    grad_acc = 1
+    grad_acc = 2
     
     assert SEQ_LEN % args.cp_size == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
 
@@ -227,7 +230,7 @@ if __name__ == "__main__":
     # if pgm.process_group_manager.global_rank == 0:
         # display_4D_parallelism_grid()
     
-    tokens_per_step = GLOBAL_BATCH_SIZE * SEQ_LEN * grad_acc * args.dp_size
+    tokens_per_step = LOCAL_BATCH_SIZE * SEQ_LEN * grad_acc * args.dp_size
     if pgm.process_group_manager.global_rank == 0:
         print("Tokens per step:", to_readable_format(tokens_per_step))
     set_all_seed(SEED)
@@ -259,7 +262,7 @@ if __name__ == "__main__":
                 "learning_rate": LEARNING_RATE,
                 "seed": SEED,
                 "micro_batch_size": MICRO_BATCH_SIZE,
-                "global_batch_size": GLOBAL_BATCH_SIZE,
+                "global_batch_size": LOCAL_BATCH_SIZE * args.dp_size,
             },
         )
 
@@ -283,7 +286,7 @@ if __name__ == "__main__":
     print("model to device time:", time.time()-start_time)
     
     start_time = time.time()
-    data_loader = MicroBatchDataLoader(global_batch_size=GLOBAL_BATCH_SIZE, micro_batch_size=MICRO_BATCH_SIZE, seq_length=SEQ_LEN, dataset_name=dataset_name, tokenizer_name=model_name, grad_acc = grad_acc,num_workers=4, num_proc=4, num_samples=NUM_SAMPLES)
+    data_loader = MicroBatchDataLoader(local_batch_size=LOCAL_BATCH_SIZE, micro_batch_size=MICRO_BATCH_SIZE, seq_length=SEQ_LEN, dataset_name=dataset_name, tokenizer_name=model_name, grad_acc = grad_acc,num_workers=4, num_proc=4, num_samples=NUM_SAMPLES)
     print("init dataloader time:", time.time()-start_time)
     tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, config.hidden_size)
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
@@ -342,7 +345,7 @@ if __name__ == "__main__":
         if step % checkpoint_freq == 0:
             save_checkpoint(model, optimizer, step, trained_tokens, checkpoint_dir+f"/{step}")
         
-        if step > total_train_steps:
+        if step >= total_train_steps:
             break
     
     if wandb_rank and args.use_wandb:
