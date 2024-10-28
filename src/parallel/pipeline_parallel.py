@@ -32,10 +32,9 @@ class PipelineParallel(nn.Module):
         torch.autograd.backward(output_tensor, grad_tensors=output_tensor_grad, retain_graph=False, create_graph=False)
         return input_tensor.grad if input_tensor is not None else None
 
-def train_step_pipeline_afab(model, data_loader, tensor_shapes, device):
+def train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype):
     logging_loss: torch.float32 = 0.0
     input_tensors, output_tensors = [], []
-    dtype = torch.bfloat16 if os.getenv("DTYPE") == "bfloat16" else torch.float32
     
     for _ in range(data_loader.num_local_micro_batches): # All forward passes
         input_tensor = pipeline_communicate(operation='recv_forward', shapes=tensor_shapes, device=device, dtype=dtype)
@@ -60,11 +59,10 @@ def train_step_pipeline_afab(model, data_loader, tensor_shapes, device):
 
     return logging_loss
 
-def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device):
+def train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype):
     num_warmup_microbatches = min(pgm.process_group_manager.pp_world_size - pgm.process_group_manager.pp_rank - 1, data_loader.num_local_micro_batches)
     num_microbatches_remaining = data_loader.num_local_micro_batches - num_warmup_microbatches
     logging_loss, input_tensors, output_tensors  = 0.0, [], []
-    dtype = torch.bfloat16 if os.getenv("DTYPE") == "bfloat16" else torch.float32
     
     def _forward_step(input_tensor):
         batch = next(data_loader)

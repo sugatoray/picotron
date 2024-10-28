@@ -5,12 +5,9 @@ import torch.nn.functional as F
 import torch.nn.init as init
 from flash_attn.flash_attn_interface import flash_attn_func
 from flash_attn.layers.rotary import apply_rotary_emb
+from flash_attn.ops.triton.layer_norm import layer_norm_fn
 import src.distributed.process_group_manager as pgm
 from src.nn.layer_norm import LlamaRMSNorm, TritonRMSNorm
-
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
-init_method = init.xavier_normal_
 
 def apply_rotary_pos_emb(x, cos, sin):
     #TODO: Maybe do class RotaryEmbedding(nn.Module) later
@@ -25,9 +22,10 @@ def get_cos_sin(seq_length, head_dim, base=500000.0):
     assert head_dim%2==0
     # Results on CUDA and CPU are different even with the same formula, To match transformers implementation. frequency should be computed on CPU
     theta = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to('cpu') / head_dim))
-    position = torch.arange(seq_length).unsqueeze(1).to(device).float() # [seq_length, 1]
+    position = torch.arange(seq_length).unsqueeze(1).float() # [seq_length, 1]
+    dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
     # To match transformers implementation. m * theta should be computed on GPU
-    theta = theta.to(device)
+    theta = theta
     return torch.cos(position.float()*theta.float()).to(dtype).repeat(1,2), torch.sin(position.float()*theta.float()).to(dtype).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
 
 def flash_attention(q, k, v, causal = True):
@@ -35,6 +33,46 @@ def flash_attention(q, k, v, causal = True):
     k = k.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
     v = v.permute(0, 2, 1, 3) # [batch_size, seq_length, num_head , head_dim]
     return flash_attn_func(q, k, v, causal=causal)
+
+class TritonRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-5, device=None, dtype=None):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.register_parameter("bias", None)
+
+    def forward(
+        self, hidden_states, residual=None, dropout_p=0.0, prenorm=False, residual_in_fp32=False, return_dropout_mask=False
+    ):
+        return layer_norm_fn(
+            hidden_states,
+            self.weight,
+            None,
+            residual=residual,
+            eps=self.eps,
+            dropout_p=dropout_p,
+            prenorm=prenorm,
+            residual_in_fp32=residual_in_fp32,
+            is_rms_norm=True,
+            return_dropout_mask=return_dropout_mask,
+        )
+
+class LlamaRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-5):
+        """
+        LlamaRMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
 
 class Attention(nn.Module):
     def __init__(self, config, layer_idx):
