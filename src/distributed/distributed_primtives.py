@@ -91,7 +91,7 @@ class ContextComms:
         self._pending_operations = []
         if VERBOSE: print(f"RingComm | wait | STEP:{STEP} | RANK:{self.rank} | "f"ACTION:all_operations_completed", flush=True)
 
-def all_reduce_loss_across_dp_ranks(loss, device):
+def all_reduce_loss_across_dp_cp_ranks(loss, device):
     reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
     # only the last stage of the pipeline parallelism contains the loss
     # we need to average the loss among the data/context parallel group

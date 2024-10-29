@@ -35,10 +35,9 @@ class DataParallel(nn.Module):
         Performs an all-reduce operation to synchronize gradients across multiple processes.    
         """
         # No synchronization needed during gradient accumulation, except at the final accumulation step.
-        # 324K tokens/s/gpu -> 334K tokens/s/gpu
         if self.require_backward_grad_sync:
-            dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.dp_group)
-            grad /= pgm.process_group_manager.dp_world_size
+            dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.cp_dp_group)
+            grad /= pgm.process_group_manager.cp_dp_world_size
         return grad 
     
     @contextlib.contextmanager

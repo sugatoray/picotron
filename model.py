@@ -2,12 +2,11 @@ import os
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.init as init
+from src.parallel.context_parallel import ring_attention, update_rope
 from flash_attn.flash_attn_interface import flash_attn_func
 from flash_attn.layers.rotary import apply_rotary_emb
 from flash_attn.ops.triton.layer_norm import layer_norm_fn
 import src.distributed.process_group_manager as pgm
-from src.nn.layer_norm import LlamaRMSNorm, TritonRMSNorm
 
 def apply_rotary_pos_emb(x, cos, sin):
     #TODO: Maybe do class RotaryEmbedding(nn.Module) later
@@ -22,10 +21,11 @@ def get_cos_sin(seq_length, head_dim, base=500000.0):
     assert head_dim%2==0
     # Results on CUDA and CPU are different even with the same formula, To match transformers implementation. frequency should be computed on CPU
     theta = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to('cpu') / head_dim))
-    position = torch.arange(seq_length).unsqueeze(1).float() # [seq_length, 1]
     dtype = torch.bfloat16 if os.getenv('DATA_TYPE', 'bfloat16') == 'bfloat16' else torch.float32
+    device = torch.device('cuda') if os.getenv('DEVICE', 'cuda') == 'cuda' else torch.device('cpu')
+    position = torch.arange(seq_length).to(device).unsqueeze(1).float() # [seq_length, 1]
     # To match transformers implementation. m * theta should be computed on GPU
-    theta = theta
+    theta = theta.to(device)
     return torch.cos(position.float()*theta.float()).to(dtype).repeat(1,2), torch.sin(position.float()*theta.float()).to(dtype).repeat(1,2) # [seq_length, head_dim], [seq_length, head_dim]
 
 def flash_attention(q, k, v, causal = True):
@@ -116,14 +116,20 @@ class Attention(nn.Module):
         k = k.repeat_interleave(self.num_local_heads // self.num_local_kv_heads, dim=1) # [batch_size, num_heads, seq_length, head_dim]
         v = v.repeat_interleave(self.num_local_heads // self.num_local_kv_heads, dim=1) # [batch_size, num_heads, seq_length, head_dim]
         
-        if os.getenv('FLASH_ATTEN', '1') != '1':
-            causal = True if q.size(2) == k.size(2) else False # During decoding phase. The lenghth of q is usually 1. 
+        causal = True if q.size(2) == k.size(2) else False # During decoding phase. The lenghth of q is usually 1. 
+        
+        if pgm.process_group_manager.cp_world_size > 1:
+            # Ring attention for context parallelism
+            sm_scale = 1.0 / (q.size(-1) ** 0.5)
+            out = ring_attention(q, k, v, sm_scale, causal).transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]
+        elif os.getenv('FLASH_ATTEN', '1') == '1':
+            # flash attention, this is faster! 
+            out = flash_attention(q, k, v, causal = causal) # [batch_size, seq_length, num_heads, head_dim] 
+        else:
             # Pytorch scaled dot product attention
             out = F.scaled_dot_product_attention(q, k, v, is_causal=causal) # [batch_size, num_heads, seq_length, head_dim]
             out = out.transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]
-        else:
-            causal = True if q.size(2) == k.size(2) else False # During decoding phase. The lenghth of q is usually 1. 
-            out = flash_attention(q, k, v, causal = causal) # [batch_size, seq_length, num_heads, head_dim] 
+        
         out = out.reshape(batch_size, seq_length, self.num_local_heads * self.head_dim) # [batch_size, seq_length, hidden_dim]
         out = self.out_proj(out) # [batch_size, seq_length, hidden_dim]
         return out
@@ -153,10 +159,12 @@ class DecoderLayer(nn.Module):
         head_dim = config.hidden_size // config.num_attention_heads
         self.cos, self.sin = get_cos_sin(config.max_position_embeddings, head_dim=head_dim , base=config.rope_theta) # [max_position_embeddings, head_dim]
 
+        # For context parallelism, we split the input. We need to get the correct cos and sin for each split
+        self.cos, self.sin = update_rope(self.cos, self.sin)
+
     def forward(self, x, attention_mask = None, position_ids = None):
         #TODO: Use the default position_ids for RoPE during training. If we have time, work on generation
-        _, seq_length, _ = x.size()
-        cos, sin = self.cos[:seq_length], self.sin[:seq_length]
+        cos, sin = self.cos, self.sin 
         x = x + self.attention(self.input_layernorm(x), cos, sin, attention_mask, position_ids) # Attention 
         x = x + self.mlp(self.post_attention_layernorm(x)) # MLP
         return x
@@ -186,7 +194,6 @@ class Llama(nn.Module):
         self.final_norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         
     def forward(self, input_ids, attention_mask=None, position_ids: torch.Tensor = None):
-        batch_size, seq_length = input_ids.size()
         x = self.embedding(input_ids)
         for layer in self.decoder_layers:
             x = layer(x)  # [batch_size, seq_length, hidden_dim]

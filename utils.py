@@ -11,8 +11,9 @@ from functools import partial
 from datasets import Features, Sequence, Value, load_dataset
 from transformers import AutoTokenizer
 
-def print(*args, **kwargs):
+def print(*args, is_print_rank=True, **kwargs):
     """ solves multi-process interleaved print problem """
+    if not is_print_rank: return
     with open(__file__, "r") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
@@ -47,7 +48,7 @@ def save_checkpoint(model, optimizer, trained_steps, trained_tokens, out_dir):
     # Only DP/CP rank 0 will save the model, the weights are the same across all ranks
     if pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.cp_rank == 0:
         os.makedirs(out_dir, exist_ok=True)
-        raw_model = model.module if pgm.process_group_manager.dp_world_size > 1 else model
+        raw_model = model.module if pgm.process_group_manager.cp_dp_world_size > 1 else model
         checkpoint = {
             'model': raw_model.state_dict(),
             'optimizer': optimizer.state_dict(),
@@ -67,7 +68,7 @@ def load_checkpoint(model, optimizer, out_dir):
     checkpoint = torch.load(path)
 
     # Load model weights
-    raw_model = model.module if pgm.process_group_manager.dp_world_size > 1 else model
+    raw_model = model.module if pgm.process_group_manager.cp_dp_world_size > 1 else model
     raw_model.load_state_dict(checkpoint['model'])
     # Load optimizer state
     optimizer.load_state_dict(checkpoint['optimizer'])

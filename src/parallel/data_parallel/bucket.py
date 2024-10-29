@@ -27,8 +27,8 @@ class Bucket:
         Launch an asynchronous all-reduce operation to synchronize gradients across processes.
         """
         assert self.handle is None
-        self.handle = dist.all_reduce(self.grad_data, group=self.process_group, async_op=True)
         self.grad_data /= self.process_group_size
+        self.handle = dist.all_reduce(self.grad_data, group=self.process_group, async_op=True)
     
     def reset(self) -> None:
         """
@@ -153,21 +153,5 @@ class BucketManager:
         """
         bucket_idx = self.params_to_bucket_location[param][2]
         self.buckets[bucket_idx].mark_param_as_ready(param)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
