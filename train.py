@@ -151,13 +151,14 @@ if __name__ == "__main__":
         )
 
     start_time = time.time()
-    model.to(dtype).to(device)
    
     if pgm.process_group_manager.tp_world_size > 1:
         TensorParallel(model)
 
     if pgm.process_group_manager.pp_world_size > 1:
         model = PipelineParallel(model, model_config)
+
+    model.to(dtype).to(device)
         
     # Context parallel and Data parallel both need gradient synchronization
     if pgm.process_group_manager.cp_dp_world_size > 1:
