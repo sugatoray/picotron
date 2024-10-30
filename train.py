@@ -146,7 +146,7 @@ if __name__ == "__main__":
     if is_wandb_rank and USE_WANDB:
         wandb.init(
             project="picotron",
-            name=f"test_convergence_GBS_{tokens_per_step}_{pgm.process_group_manager}",
+            name=f"{config['logging']['run_name']}_{tokens_per_step}_{pgm.process_group_manager}",
             config={
                 "tensor_parallel_size": pgm.process_group_manager.tp_size,
                 "context_parallel_size": pgm.process_group_manager.cp_size,
