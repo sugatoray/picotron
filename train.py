@@ -32,7 +32,7 @@ def train_step(model, data_loader, device):
     acc_loss = 0.0
     
     requires_grad_sync = pgm.process_group_manager.cp_dp_world_size > 1
-    for i in range(data_loader.grad_acc):
+    for i in range(data_loader.grad_acc_steps):
         # get the next batch
         batch = next(data_loader)
         input_ids = batch["input_ids"].to(device)
@@ -40,7 +40,7 @@ def train_step(model, data_loader, device):
 
         # disable gradient synchronization for all but the last micro-batch
         if requires_grad_sync:
-            model.require_backward_grad_sync = (i == data_loader.grad_acc - 1)
+            model.require_backward_grad_sync = (i == data_loader.grad_acc_steps - 1)
 
         outputs = model(input_ids=input_ids)
 
@@ -48,7 +48,7 @@ def train_step(model, data_loader, device):
         batch_size, seq_len = input_ids.shape
         target_ids = target_ids.reshape(-1)
         outputs = outputs.view(seq_len*batch_size, -1)
-        loss = F.cross_entropy(outputs, target_ids, reduction='mean') / data_loader.grad_acc
+        loss = F.cross_entropy(outputs, target_ids, reduction='mean') / data_loader.grad_acc_steps
         
         loss.backward()
 
@@ -80,16 +80,17 @@ if __name__ == "__main__":
     MAX_TOKENS = config["training"]["max_tokens"]
     SEED = config["training"]["seed"]
     TOTAL_TRAIN_STEPS = config["training"]["total_train_steps"]
-    GRAD_ACC = config["training"]["gradient_accumulation_steps"]
+    GRAD_ACC_STEPS = config["training"]["gradient_accumulation_steps"]
     MODEL_NAME = config["model"]["name"]
     DATASET_NAME = config["dataset"]["name"]
     NUM_WORKERS = config["dataset"]["num_workers"]
     NUM_PROC = config["dataset"]["num_proc"]
     USE_WANDB = config["logging"]["use_wandb"]
     TP_SIZE = config["distributed"]["tp_size"]
-    PP_SIZE = config["distributed"]["pp_size"]
-    DP_SIZE = config["distributed"]["dp_size"]
     CP_SIZE = config["distributed"]["cp_size"]
+    DP_SIZE = config["distributed"]["dp_size"]
+    PP_SIZE = config["distributed"]["pp_size"]
+    PP_ENGINE = config["distributed"]["pp_engine"]
     LOAD_PATH = config["checkpoint"]["load_path"]
     CHECKPOINT_DIR = config["checkpoint"]["save_dir"]
     CHECKPOINT_FREQ = config["checkpoint"]["save_frequency"]
@@ -131,7 +132,7 @@ if __name__ == "__main__":
         seq_length=SEQ_LEN,
         dataset_name=DATASET_NAME,
         tokenizer_name=MODEL_NAME,
-        grad_acc=GRAD_ACC,
+        grad_acc_steps=GRAD_ACC_STEPS,
         num_workers=NUM_WORKERS,
         num_proc=NUM_PROC,
         num_samples=NUM_SAMPLES
@@ -158,7 +159,7 @@ if __name__ == "__main__":
                 "seed": SEED,
                 "micro_batch_size": data_loader.micro_batch_size,
                 "global_batch_size": data_loader.global_batch_size,
-                "gradient_accumulation": GRAD_ACC,
+                "gradient_accumulation": data_loader.grad_acc_steps,
             },
         )
 
@@ -190,12 +191,7 @@ if __name__ == "__main__":
         step, trained_tokens = load_checkpoint(model, optimizer, LOAD_PATH)
     
     dist.barrier()
-
-    # #TODO: Double-check consumed tokens after each steps (for example, MICRO_BATCH_SIZE=2 and using only dp_size=4, num_local_micro_batches=0 => division by 0)
-    # #TODO: Check convergence
-    # #TODO: Try multi-nodes
     # #TODO: Add activation checkpointing
-    # #TODO: add gradient accumulation
     
     while MAX_TOKENS is None or trained_tokens < MAX_TOKENS:
         #TODO: Add epoch support
@@ -204,7 +200,12 @@ if __name__ == "__main__":
         optimizer.zero_grad()
         
         if pgm.process_group_manager.pp_world_size > 1:
-            loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype)
+            if PP_ENGINE == "afab":
+                loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype)
+            elif PP_ENGINE == "1f1b":
+                loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype)
+            else:
+                raise ValueError(f"Invalid pipeline parallel engine: {PP_ENGINE}")
         else:
             loss = train_step(model, data_loader, device)
             
