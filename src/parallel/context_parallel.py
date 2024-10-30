@@ -181,19 +181,7 @@ def update_out_and_lse(
         
     return out, lse
 
-def parallel_input(input_ids, target_ids):
-    cp_rank, cp_word_size = pgm.process_group_manager.cp_rank, pgm.process_group_manager.cp_world_size
-    batch_size, seq_length = input_ids.size()
-    assert seq_length % cp_word_size == 0, f"Input sequence length ({seq_length}) must be divisible by cp_world_size ({cp_word_size})"
-    size_per_partition = seq_length // cp_word_size
-    
-    # Calculate start and end indices for this rank
-    start_idx, end_idx = cp_rank * size_per_partition, (cp_rank + 1) * size_per_partition
-    local_input_ids = input_ids[:, start_idx:end_idx]
-    local_target_ids = target_ids[:, start_idx:end_idx]
-    return local_input_ids, local_target_ids
-
-def update_rope(cos, sin):
+def update_rope_for_context_parallel(cos, sin):
     seq_len, _ = cos.size()
     cp_rank, cp_word_size = pgm.process_group_manager.cp_rank, pgm.process_group_manager.cp_world_size
     assert seq_len % cp_word_size == 0, f"Input sequence length ({seq_len}) must be divisible by cp_world_size ({cp_word_size})"

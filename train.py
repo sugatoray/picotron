@@ -13,7 +13,6 @@ import os
 import json
 import time
 import argparse
-from src.parallel.context_parallel import parallel_input
 import torch.nn.functional as F
 import torch, torch.distributed as dist
 from torch.optim import AdamW
@@ -38,7 +37,6 @@ def train_step(model, data_loader, device):
         batch = next(data_loader)
         input_ids = batch["input_ids"].to(device)
         target_ids = batch["target_ids"].to(device)
-        input_ids, target_ids = parallel_input(input_ids, target_ids) # for context parallel, we need to split the input
 
         # disable gradient synchronization for all but the last micro-batch
         if requires_grad_sync:
@@ -68,7 +66,7 @@ if __name__ == "__main__":
     
     os.environ["OMP_NUM_THREADS"] = config["environment"]["OMP_NUM_THREADS"]
     os.environ["TOKENIZERS_PARALLELISM"] = config["environment"]["TOKENIZERS_PARALLELISM"]
-    os.environ["FLASH_ATTEN"] = config["environment"]["FLASH_ATTEN"] # Use cuda kernels from flash attention repo to accelerate the training. Model dtype should be torch.float16!
+    os.environ["FLASH_ATTEN"] = config["environment"]["FLASH_ATTEN"] # Use cuda kernels from flash attention repo to accelerate the training. Model dtype should be torch.bfloat16!
     os.environ["DEVICE"] = "cpu" if config["distributed"]["use_cpu"] else "cuda"
     
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() and not config["distributed"]["use_cpu"] else torch.float32 # if GPU is not available or not supported, use torch.float32
