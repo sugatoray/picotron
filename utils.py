@@ -103,8 +103,8 @@ class MicroBatchDataLoader(DataLoader):
         )
         
         super().__init__(
-            self.tokenized_dataset, 
-            batch_size=micro_batch_size if pgm.process_group_manager.pp_world_size > 1 else self.local_batch_size, # in PP we split a single batch into multiple micro-batches
+            self.tokenized_dataset,
+            batch_size=micro_batch_size,
             collate_fn=self.collate_batch, 
             pin_memory=True, 
             num_workers=num_workers, 
