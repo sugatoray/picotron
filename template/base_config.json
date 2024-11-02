@@ -6,7 +6,7 @@
         "dp_size": 1,
         "pp_engine": "afab",
         "master_addr": "localhost",
-        "master_port": 29500,
+        "master_port": null,
         "backend": "nccl",
         "use_cpu": false
     },

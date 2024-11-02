@@ -1,4 +1,5 @@
 import torch
+import socket
 import random
 import os
 import numpy as np
@@ -20,6 +21,17 @@ def print(*args, is_print_rank=True, **kwargs):
             builtins.print(*args, **kwargs)
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+def find_free_port(min_port: int = 2000, max_port: int = 65000) -> int:
+    while True:
+        port = random.randint(min_port, max_port)
+        try:
+            with socket.socket() as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("localhost", port))
+                return port
+        except OSError:
+            continue
 
 def set_all_seed(seed):
     for module in [random, np.random]: module.seed(seed)
@@ -89,8 +101,6 @@ class MicroBatchDataLoader(DataLoader):
         self.dataset = load_dataset(dataset_name, split=split)
         if num_samples:
             self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
-        
-        dist.barrier()
         
         # Tokenize and chunk the dataset
         self.tokenized_dataset = self.tokenize_dataset(self.dataset, "text", self.seq_length, num_proc)

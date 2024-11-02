@@ -8,10 +8,11 @@ CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
 #VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
 """
-import inspect
 import os
+import inspect
 import json
 import time
+import datetime
 import argparse
 import torch.nn.functional as F
 import torch, torch.distributed as dist
@@ -20,7 +21,7 @@ from transformers import AutoConfig
 import numpy as np
 from src.parallel.tensor_parallel.tensor_parallel import TensorParallel
 import src.distributed.process_group_manager as pgm
-from utils import MicroBatchDataLoader, set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint
+from utils import MicroBatchDataLoader, set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint, find_free_port
 from src.distributed.process_group_manager import setup_process_group_manager
 from src.parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from src.parallel.data_parallel.data_parallel_bucket import DataParallel
@@ -97,8 +98,13 @@ if __name__ == "__main__":
     
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    host = os.environ["MASTER_ADDR"]
-    port = int(os.environ["MASTER_PORT"])
+    host = config["distributed"]["master_addr"]
+    port = config["distributed"]["master_port"]
+    if port is None:
+        port = find_free_port()
+    else:
+        port = int(port)
+
     backend = "gloo" if config["distributed"]["use_cpu"] else "nccl"
     
     assert SEQ_LEN % CP_SIZE == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
@@ -110,9 +116,11 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
 
-    dist.init_process_group(rank=local_rank, world_size=world_size, backend=backend, init_method=f"tcp://{host}:{port}")
+    dist.init_process_group(rank=local_rank, world_size=world_size, backend=backend, init_method=f"env://{host}:{port}", timeout=datetime.timedelta(minutes=10))
     setup_process_group_manager(tp_size=TP_SIZE, cp_size=CP_SIZE, pp_size=PP_SIZE, dp_size=DP_SIZE)
     is_wandb_rank = pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.cp_rank == 0 and pgm.process_group_manager.pp_is_last_stage
+
+    dist.barrier()
 
     set_all_seed(SEED)
 
@@ -125,6 +133,7 @@ if __name__ == "__main__":
     start_time = time.time()
     model = Llama(config=model_config)
     print("init model time:", time.time()-start_time, is_print_rank=is_wandb_rank)
+    dist.barrier()
 
     start_time = time.time()
     data_loader = MicroBatchDataLoader(
@@ -137,6 +146,9 @@ if __name__ == "__main__":
         num_proc=NUM_PROC,
         num_samples=NUM_SAMPLES
     )
+
+    dist.barrier()        
+
     print("init dataloader time:", time.time()-start_time, is_print_rank=is_wandb_rank)
     tokens_per_step = data_loader.global_batch_size * SEQ_LEN
     
