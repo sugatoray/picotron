@@ -8,7 +8,7 @@ CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
 #VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
 """
-
+import inspect
 import os
 import json
 import time
@@ -184,8 +184,15 @@ if __name__ == "__main__":
     print("model to device time:", time.time()-start_time, is_print_rank=is_wandb_rank)
     
     tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, model_config.hidden_size)
-    optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     
+    extra_args = dict()
+    if config["model"]["use_fused_adam"]:
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+
+    optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, **extra_args)
+
     trained_tokens, step = 0, 0
     if LOAD_PATH:
         step, trained_tokens = load_checkpoint(model, optimizer, LOAD_PATH)
