@@ -31,7 +31,7 @@
     },
     "dataset": {
         "name": "roneneldan/TinyStories",
-        "num_workers": 4,
+        "num_workers": 8,
         "num_proc": 4
     },
     "checkpoint": {
