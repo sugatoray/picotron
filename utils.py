@@ -1,12 +1,11 @@
 import torch
-import socket
 import random
 import os
 import numpy as np
 import builtins
 import fcntl
 import src.distributed.process_group_manager as pgm
-import torch, torch.distributed as dist
+import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from functools import partial
 from datasets import Features, Sequence, Value, load_dataset
@@ -21,17 +20,6 @@ def print(*args, is_print_rank=True, **kwargs):
             builtins.print(*args, **kwargs)
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
-
-def find_free_port(min_port: int = 2000, max_port: int = 65000) -> int:
-    while True:
-        port = random.randint(min_port, max_port)
-        try:
-            with socket.socket() as sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind(("localhost", port))
-                return port
-        except OSError:
-            continue
 
 def set_all_seed(seed):
     for module in [random, np.random]: module.seed(seed)

@@ -51,6 +51,7 @@ export HF_HOME=/fsx/$USER/.cache/huggingface
 export WANDB_DIR=/fsx/$USER/.cache/wandb
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 export CUDA_DEVICE_MAX_CONNECTIONS="1"
+export FI_PROVIDER="efa"
 
 module load cuda/12.1
 
