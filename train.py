@@ -34,7 +34,7 @@ def train_step(model, data_loader, device):
     acc_loss = 0.0
     
     requires_grad_sync = pgm.process_group_manager.cp_dp_world_size > 1
-    for i in range(data_loader.grad_acc):
+    for i in range(data_loader.grad_acc_steps):
         # get the next batch
         batch = next(data_loader)
         input_ids = batch["input_ids"].to(device)
@@ -42,7 +42,7 @@ def train_step(model, data_loader, device):
 
         # disable gradient synchronization for all but the last micro-batch
         if requires_grad_sync:
-            model.require_backward_grad_sync = (i == data_loader.grad_acc - 1)
+            model.require_backward_grad_sync = (i == data_loader.grad_acc_steps - 1)
 
         outputs = model(input_ids=input_ids)
 
@@ -50,7 +50,7 @@ def train_step(model, data_loader, device):
         batch_size, seq_len = input_ids.shape
         target_ids = target_ids.reshape(-1)
         outputs = outputs.view(seq_len*batch_size, -1)
-        loss = F.cross_entropy(outputs, target_ids, reduction='mean') / data_loader.grad_acc
+        loss = F.cross_entropy(outputs, target_ids, reduction='mean') / data_loader.grad_acc_steps
         
         loss.backward()
 
@@ -82,7 +82,7 @@ if __name__ == "__main__":
     MAX_TOKENS = config["training"]["max_tokens"]
     SEED = config["training"]["seed"]
     TOTAL_TRAIN_STEPS = config["training"]["total_train_steps"]
-    GRAD_ACC = config["training"]["gradient_accumulation_steps"]
+    GRAD_ACC_STEPS = config["training"]["gradient_accumulation_steps"]
     MODEL_NAME = config["model"]["name"]
     DATASET_NAME = config["dataset"]["name"]
     NUM_WORKERS = config["dataset"]["num_workers"]
@@ -168,7 +168,7 @@ if __name__ == "__main__":
                 "seed": SEED,
                 "micro_batch_size": data_loader.micro_batch_size,
                 "global_batch_size": data_loader.global_batch_size,
-                "gradient_accumulation": GRAD_ACC,
+                "gradient_accumulation": data_loader.grad_acc_steps,
             },
         )
 

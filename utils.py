@@ -5,7 +5,7 @@ import numpy as np
 import builtins
 import fcntl
 import src.distributed.process_group_manager as pgm
-import torch, torch.distributed as dist
+import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from functools import partial
 from datasets import Features, Sequence, Value, load_dataset
@@ -75,15 +75,12 @@ def load_checkpoint(model, optimizer, out_dir):
     return checkpoint['trained_steps'], checkpoint['trained_tokens']         
 
 class MicroBatchDataLoader(DataLoader):
-    def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc, split="train", num_samples=None):
+    def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc_steps, split="train", num_samples=None):
         
         self.micro_batch_size = micro_batch_size
         self.seq_length = seq_length
-        self.grad_acc = grad_acc
-
-        self.local_batch_size = micro_batch_size * grad_acc
-        self.global_batch_size = self.local_batch_size * pgm.process_group_manager.dp_world_size
-        self.num_local_micro_batches = self.local_batch_size // self.micro_batch_size
+        self.grad_acc_steps = grad_acc_steps
+        self.global_batch_size = micro_batch_size * grad_acc_steps * pgm.process_group_manager.dp_world_size
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
         
         self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
@@ -92,8 +89,6 @@ class MicroBatchDataLoader(DataLoader):
         self.dataset = load_dataset(dataset_name, split=split)
         if num_samples:
             self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
-        
-        dist.barrier()
         
         # Tokenize and chunk the dataset
         self.tokenized_dataset = self.tokenize_dataset(self.dataset, "text", self.seq_length, num_proc)
@@ -106,8 +101,8 @@ class MicroBatchDataLoader(DataLoader):
         )
         
         super().__init__(
-            self.tokenized_dataset, 
-            batch_size=micro_batch_size if pgm.process_group_manager.pp_world_size > 1 else self.local_batch_size, # in PP we split a single batch into multiple micro-batches
+            self.tokenized_dataset,
+            batch_size=micro_batch_size,
             collate_fn=self.collate_batch, 
             pin_memory=True, 
             num_workers=num_workers, 
