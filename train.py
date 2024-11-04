@@ -26,7 +26,7 @@ from picotron.utils import set_all_seed, print, to_readable_format, save_checkpo
 from picotron.data import MicroBatchDataLoader
 from picotron.process_group_manager import setup_process_group_manager
 from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
-from picotron.data_parallel.data_parallel_bucket import DataParallel
+from picotron.data_parallel.data_parallel import DataParallelBucket
 from picotron.model import Llama
 import wandb
 
@@ -203,7 +203,7 @@ if __name__ == "__main__":
         
     # Context parallel and Data parallel both need gradient synchronization
     if pgm.process_group_manager.cp_dp_world_size > 1:
-        model = DataParallel(model)
+        model = DataParallelBucket(model)
     
     print("init model parallel time:", time.time()-start_time, is_print_rank=is_wandb_rank)
     start_time = time.time()
