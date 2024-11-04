@@ -14,7 +14,8 @@
         "num_attention_heads": 16,
         "num_key_value_heads": 4,
         "dtype": "bfloat16",
-        "use_flash_attention": true
+        "use_flash_attention": true,
+        "use_fused_adam": true
     },
     "training": {
         "seed": 42,
