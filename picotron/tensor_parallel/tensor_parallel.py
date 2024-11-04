@@ -2,15 +2,65 @@
 Inspired by Fair Scale/Megatron's Tensor Parallelism implementation
 Ref: https://github.com/facebookresearch/fairscale/tree/main/fairscale
 """
-from src.parallel.tensor_parallel.utils import VocabUtility
+from picotron.tensor_parallel.tp_utils import VocabUtility
 import torch
 import math
 import torch.nn.init as init
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from typing import Callable, Optional
-import src.distributed.process_group_manager as pgm
-from src.parallel.tensor_parallel.mappings import copy_to_model_parallel_region, gather_from_model_parallel_region, reduce_from_model_parallel_region
+import picotron.process_group_manager as pgm
+from functools import partial
+import torch.nn.init as init
+from picotron.tensor_parallel.tp_communications import copy_to_model_parallel_region, gather_from_model_parallel_region, reduce_from_model_parallel_region
+
+def apply_tensor_parallel(model, init_method):
+
+    def _replace_module(_module, _linear_proj_name, _style, _init_method, args={}):
+        assert _style in ["column", "row", 'vocab']
+        linear_layer = getattr(_module, _linear_proj_name)
+        
+        if _style == "column":
+            new_linear_layer = ColumnParallelLinear(
+                in_features=linear_layer.in_features,
+                out_features=linear_layer.out_features,
+                bias=linear_layer.bias is not None,
+                init_method=_init_method,
+                gather_output=args.get("gather_output", False)
+            )
+        elif _style == "row":
+            new_linear_layer = RowParallelLinear(
+                in_features=linear_layer.in_features,
+                out_features=linear_layer.out_features,
+                bias=linear_layer.bias is not None,
+                init_method=_init_method
+            )
+        else:
+            new_linear_layer = VocabParallelEmbedding(
+                num_embeddings=linear_layer.num_embeddings,
+                embedding_dim=linear_layer.embedding_dim,
+                init_method=partial(_init_method, vocab_embedding=True)
+            )
+        setattr(_module, _linear_proj_name, new_linear_layer)
+
+    module_linear_name_stype_mapping_list = [
+        ("attention", "q_proj", "column"),
+        ("attention", "k_proj", "column"),
+        ("attention", "v_proj", "column"),
+        ("attention", "out_proj", "row"),
+        ("mlp", "up_proj", "column"),
+        ("mlp", "gate_proj", "column"),
+        ("mlp", "down_proj", "row"),
+    ]
+
+    for layer in model.decoder_layers:
+        for module_name, linear_proj_name, style in module_linear_name_stype_mapping_list:
+            _replace_module(getattr(layer, module_name), linear_proj_name, style, init_method)
+            
+    _replace_module(model, "embedding", "vocab", init_method)
+    _replace_module(model, "final_proj", "column", init_method, args={"gather_output": True})
+    
+    return model
 
 def initialize_weight_tensor(weight, vocab_embedding=False):
     """

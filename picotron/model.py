@@ -2,11 +2,11 @@ import os
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
-from src.parallel.context_parallel import ring_attention, update_rope_for_context_parallel
+from picotron.context_parallel import context_parallel
 from flash_attn.flash_attn_interface import flash_attn_func
 from flash_attn.layers.rotary import apply_rotary_emb
 from flash_attn.ops.triton.layer_norm import layer_norm_fn
-import src.distributed.process_group_manager as pgm
+import picotron.process_group_manager as pgm
 
 def apply_rotary_pos_emb(x, cos, sin):
     #TODO: Maybe do class RotaryEmbedding(nn.Module) later
@@ -119,10 +119,10 @@ class Attention(nn.Module):
         
         causal = True if q.size(2) == k.size(2) else False # During decoding phase. The lenghth of q is usually 1. 
         
-        if pgm.process_group_manager.cp_world_size > 1:
+        if os.getenv('CONTEXT_PARALLEL', '0') == '1':
             # Ring attention for context parallelism
             sm_scale = 1.0 / (q.size(-1) ** 0.5)
-            out = ring_attention(q, k, v, sm_scale, causal).transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]
+            out = context_parallel.ring_attention(q, k, v, sm_scale, causal).transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]
         elif os.getenv('FLASH_ATTEN', '1') == '1':
             # flash attention, this is faster! 
             out = flash_attention(q, k, v, causal = causal) # [batch_size, seq_length, num_heads, head_dim] 
@@ -161,7 +161,7 @@ class DecoderLayer(nn.Module):
         self.cos, self.sin = get_cos_sin(config.max_position_embeddings, head_dim=head_dim , base=config.rope_theta) # [max_position_embeddings, head_dim]
 
         # For context parallelism, we split the input. We need to get the correct cos and sin for each split
-        self.cos, self.sin = update_rope_for_context_parallel(self.cos, self.sin)
+        self.cos, self.sin = context_parallel.update_rope_for_context_parallel(self.cos, self.sin)
 
     def forward(self, x, attention_mask = None, position_ids = None):
         #TODO: Use the default position_ids for RoPE during training. If we have time, work on generation
