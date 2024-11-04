@@ -4,7 +4,7 @@ import os
 import numpy as np
 import builtins
 import fcntl
-import src.distributed.process_group_manager as pgm
+import picotron.process_group_manager as pgm
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from functools import partial

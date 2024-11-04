@@ -20,15 +20,15 @@ import torch, torch.distributed as dist
 from torch.optim import AdamW
 from transformers import AutoConfig
 import numpy as np
-from src.parallel.tensor_parallel.tensor_parallel import TensorParallel
-import src.distributed.process_group_manager as pgm
+from picotron.parallel.tensor_parallel.tensor_parallel import TensorParallel
+import picotron.process_group_manager as pgm
 from utils import MicroBatchDataLoader, set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint
-from src.distributed.process_group_manager import setup_process_group_manager
-from src.parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
-from src.parallel.data_parallel.data_parallel_bucket import DataParallel
+from picotron.process_group_manager import setup_process_group_manager
+from picotron.parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
+from picotron.parallel.data_parallel.data_parallel_bucket import DataParallel
 from model import Llama
 import wandb
-from src.distributed.distributed_primtives import all_reduce_loss_across_dp_cp_ranks
+from picotron.distributed.distributed_primtives import all_reduce_loss_across_dp_cp_ranks
 
 def train_step(model, data_loader, device):
     acc_loss = 0.0

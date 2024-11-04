@@ -1,5 +1,5 @@
-import src.distributed.process_group_manager as pgm
-from src.distributed.distributed_primtives import pipeline_communicate, bidirectional_pipeline_communicate
+import picotron.process_group_manager as pgm
+from picotron.distributed.distributed_primtives import pipeline_communicate, bidirectional_pipeline_communicate
 import torch, torch.nn as nn, torch.nn.functional as F
 import os
 

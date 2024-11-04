@@ -2,7 +2,7 @@ import contextlib
 import torch
 import torch.distributed as dist
 from torch import nn
-import src.distributed.process_group_manager as pgm
+import picotron.process_group_manager as pgm
 
 class DataParallel(nn.Module):
     def __init__(self, module):

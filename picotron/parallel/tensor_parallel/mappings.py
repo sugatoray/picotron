@@ -2,10 +2,10 @@
 Inspired by Fair Scale/Megatron's Tensor Parallelism implementation
 Ref: https://github.com/facebookresearch/fairscale/tree/main/fairscale
 """
-from src.parallel.tensor_parallel.utils import split_tensor_along_last_dim
+from picotron.parallel.tensor_parallel.utils import split_tensor_along_last_dim
 import torch.distributed as dist
 import torch
-import src.distributed.process_group_manager as pgm
+import picotron.process_group_manager as pgm
 
 def _reduce(input_):
     """All-reduce the input tensor across model parallel(Tensor Parallel) group."""    

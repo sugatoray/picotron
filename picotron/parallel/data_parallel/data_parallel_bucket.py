@@ -3,8 +3,8 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.autograd import Variable
-from src.parallel.data_parallel.bucket import BucketManager
-import src.distributed.process_group_manager as pgm
+from picotron.parallel.data_parallel.bucket import BucketManager
+import picotron.process_group_manager as pgm
 
 class DataParallel(nn.Module):
     def __init__(self, module, bucket_cap_mb=25, grad_type = torch.float32):

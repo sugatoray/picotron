@@ -4,8 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import distributed as dist
 from typing import Any, Optional, Tuple
-from src.distributed.distributed_primtives import ContextComms
-import src.distributed.process_group_manager as pgm
+from picotron.distributed.distributed_primtives import ContextComms
+import picotron.process_group_manager as pgm
 
 def ring_attention(q, k, v, sm_scale, is_causal):
     return RingAttentionFunc.apply(q, k, v, sm_scale, is_causal)

@@ -2,11 +2,11 @@ import os
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
-from src.parallel.context_parallel import ring_attention, update_rope_for_context_parallel
+from picotron.parallel.context_parallel import ring_attention, update_rope_for_context_parallel
 from flash_attn.flash_attn_interface import flash_attn_func
 from flash_attn.layers.rotary import apply_rotary_emb
 from flash_attn.ops.triton.layer_norm import layer_norm_fn
-import src.distributed.process_group_manager as pgm
+import picotron.process_group_manager as pgm
 
 def apply_rotary_pos_emb(x, cos, sin):
     #TODO: Maybe do class RotaryEmbedding(nn.Module) later

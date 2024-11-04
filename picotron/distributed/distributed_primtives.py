@@ -1,5 +1,5 @@
 import os
-import src.distributed.process_group_manager as pgm
+import picotron.process_group_manager as pgm
 from typing import List, Optional
 import torch, torch.distributed as dist
 
