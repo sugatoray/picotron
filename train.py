@@ -8,8 +8,9 @@ CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun    --nproc_per_node=4    --nnodes=1    --rdzv_backend=c10d    --rdzv_endpoint=localhost:29400    --max_restarts=0    --tee=3    train.py
 #VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
 """
-
 import os
+import inspect
+import datetime
 import json
 import time
 import argparse
@@ -88,16 +89,15 @@ if __name__ == "__main__":
     USE_WANDB = config["logging"]["use_wandb"]
     TP_SIZE = config["distributed"]["tp_size"]
     PP_SIZE = config["distributed"]["pp_size"]
-    DP_SIZE = config["distributed"]["dp_size"]
-    CP_SIZE = config["distributed"]["cp_size"]
+    PP_ENGINE = config["distributed"]["pp_engine"]
     LOAD_PATH = config["checkpoint"]["load_path"]
     CHECKPOINT_DIR = config["checkpoint"]["save_dir"]
     CHECKPOINT_FREQ = config["checkpoint"]["save_frequency"]
     
     local_rank = int(os.environ["LOCAL_RANK"])
+    global_rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    host = os.environ["MASTER_ADDR"]
-    port = int(os.environ["MASTER_PORT"])
+
     backend = "gloo" if config["distributed"]["use_cpu"] else "nccl"
     
     assert SEQ_LEN % CP_SIZE == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
@@ -109,9 +109,11 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
 
-    dist.init_process_group(rank=local_rank, world_size=world_size, backend=backend, init_method=f"tcp://{host}:{port}")
+    dist.init_process_group(rank=global_rank, world_size=world_size, backend=backend, init_method=f"env://", timeout=datetime.timedelta(minutes=3))
     setup_process_group_manager(tp_size=TP_SIZE, cp_size=CP_SIZE, pp_size=PP_SIZE, dp_size=DP_SIZE)
     is_wandb_rank = pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.cp_rank == 0 and pgm.process_group_manager.pp_is_last_stage
+
+    dist.barrier()
 
     set_all_seed(SEED)
 
@@ -183,8 +185,15 @@ if __name__ == "__main__":
     print("model to device time:", time.time()-start_time, is_print_rank=is_wandb_rank)
     
     tensor_shapes = (data_loader.micro_batch_size, data_loader.seq_length_per_gpu, model_config.hidden_size)
-    optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     
+    extra_args = dict()
+    if config["model"]["use_fused_adam"]:
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+
+    optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, **extra_args)
+
     trained_tokens, step = 0, 0
     if LOAD_PATH:
         step, trained_tokens = load_checkpoint(model, optimizer, LOAD_PATH)
@@ -204,7 +213,12 @@ if __name__ == "__main__":
         optimizer.zero_grad()
         
         if pgm.process_group_manager.pp_world_size > 1:
-            loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype)
+            if PP_ENGINE == "afab":
+                loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype)
+            elif PP_ENGINE == "1f1b":
+                loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype)
+            else:
+                raise ValueError(f"Invalid pipeline parallel engine: {PP_ENGINE}")
         else:
             loss = train_step(model, data_loader, device)
             
