@@ -19,16 +19,24 @@ import torch.nn.functional as F
 import torch, torch.distributed as dist
 from torch.optim import AdamW
 from transformers import AutoConfig
-import numpy as np
-from src.parallel.tensor_parallel.tensor_parallel import TensorParallel
-import src.distributed.process_group_manager as pgm
-from utils import MicroBatchDataLoader, set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint
-from src.distributed.process_group_manager import setup_process_group_manager
-from src.parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
-from src.parallel.data_parallel.data_parallel_bucket import DataParallel
-from model import Llama
+from picotron.context_parallel.context_parallel import apply_context_parallel
+from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel, initialize_weight_tensor
+import picotron.process_group_manager as pgm
+from picotron.utils import set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint
+from picotron.data import MicroBatchDataLoader
+from picotron.process_group_manager import setup_process_group_manager
+from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
+from picotron.data_parallel.data_parallel import DataParallelBucket
+from picotron.model import Llama
 import wandb
-from src.distributed.distributed_primtives import all_reduce_loss_across_dp_cp_ranks
+
+def all_reduce_loss_across_dp_cp_ranks(loss, device):
+    reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
+    # only the last stage of the pipeline parallelism contains the loss
+    # we need to average the loss among the data/context parallel group
+    if pgm.process_group_manager.pp_is_last_stage:
+        dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pgm.process_group_manager.cp_dp_group)
+    return reduced_loss.item()
 
 def train_step(model, data_loader, device):
     acc_loss = 0.0
@@ -116,20 +124,6 @@ if __name__ == "__main__":
     setup_process_group_manager(tp_size=TP_SIZE, cp_size=CP_SIZE, pp_size=PP_SIZE, dp_size=DP_SIZE)
     is_wandb_rank = pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.cp_rank == 0 and pgm.process_group_manager.pp_is_last_stage
 
-    dist.barrier()
-
-    set_all_seed(SEED)
-
-    model_config = AutoConfig.from_pretrained(MODEL_NAME)
-    model_config.num_hidden_layers = config["model"]["num_hidden_layers"]
-    model_config.num_attention_heads = config["model"]["num_attention_heads"]
-    model_config.num_key_value_heads = config["model"]["num_key_value_heads"]
-    model_config.max_position_embeddings = SEQ_LEN
-
-    start_time = time.time()
-    model = Llama(config=model_config)
-    print("init model time:", time.time()-start_time, is_print_rank=is_wandb_rank)
-
     set_all_seed(SEED)
     
     start_time = time.time()
@@ -144,7 +138,7 @@ if __name__ == "__main__":
         num_samples=NUM_SAMPLES
     )
 
-    dist.barrier()        
+    dist.barrier()
 
     print("init dataloader time:", time.time()-start_time, is_print_rank=is_wandb_rank)
     tokens_per_step = data_loader.global_batch_size * SEQ_LEN
@@ -172,8 +166,6 @@ if __name__ == "__main__":
             },
         )
 
-    start_time = time.time()
-   
     model_config = AutoConfig.from_pretrained(MODEL_NAME)
     model_config.num_hidden_layers = config["model"]["num_hidden_layers"]
     model_config.num_attention_heads = config["model"]["num_attention_heads"]
@@ -185,17 +177,22 @@ if __name__ == "__main__":
     print("init model time:", time.time()-start_time, is_print_rank=is_wandb_rank)
     dist.barrier()
 
-    if pgm.process_group_manager.tp_world_size > 1:
-        TensorParallel(model)
+    start_time = time.time()
 
+    if pgm.process_group_manager.tp_world_size > 1:
+        model = apply_tensor_parallel(model, init_method=initialize_weight_tensor)
+
+    if pgm.process_group_manager.cp_world_size > 1:
+        model = apply_context_parallel(model)
+        
     if pgm.process_group_manager.pp_world_size > 1:
         model = PipelineParallel(model, model_config)
 
     model.to(dtype).to(device)
         
-    # Context parallel and Data parallel both need gradient synchronization
     if pgm.process_group_manager.cp_dp_world_size > 1:
-        model = DataParallel(model)
+        # Context parallel and Data parallel both need gradient synchronization
+        model = DataParallelBucket(model)
     
     print("init model parallel time:", time.time()-start_time, is_print_rank=is_wandb_rank)
     start_time = time.time()
