@@ -1,9 +1,9 @@
-import contextlib
 import torch
-import torch.distributed as dist
+import contextlib
 from torch import nn
 from torch.autograd import Variable
-from picotron.parallel.data_parallel.bucket import BucketManager
+
+from picotron.data_parallel.bucket import BucketManager
 import picotron.process_group_manager as pgm
 
 class DataParallel(nn.Module):

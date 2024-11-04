@@ -2,7 +2,7 @@
 Inspired by Fair Scale/Megatron's Tensor Parallelism implementation
 Ref: https://github.com/facebookresearch/fairscale/tree/main/fairscale
 """
-from picotron.parallel.tensor_parallel.utils import VocabUtility
+from picotron.tensor_parallel.utils import VocabUtility
 import torch
 import math
 import torch.nn.init as init
@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from typing import Callable, Optional
 import picotron.process_group_manager as pgm
-from picotron.parallel.tensor_parallel.mappings import copy_to_model_parallel_region, gather_from_model_parallel_region, reduce_from_model_parallel_region
+from picotron.tensor_parallel.mappings import copy_to_model_parallel_region, gather_from_model_parallel_region, reduce_from_model_parallel_region
 
 def initialize_weight_tensor(weight, vocab_embedding=False):
     """

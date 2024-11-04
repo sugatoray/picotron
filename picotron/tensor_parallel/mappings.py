@@ -2,7 +2,7 @@
 Inspired by Fair Scale/Megatron's Tensor Parallelism implementation
 Ref: https://github.com/facebookresearch/fairscale/tree/main/fairscale
 """
-from picotron.parallel.tensor_parallel.utils import split_tensor_along_last_dim
+from picotron.tensor_parallel.utils import split_tensor_along_last_dim
 import torch.distributed as dist
 import torch
 import picotron.process_group_manager as pgm

@@ -1,11 +1,10 @@
 # Inspired by https://github.com/zhuzilin/ring-flash-attention
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch import distributed as dist
 from typing import Any, Optional, Tuple
-from picotron.distributed.distributed_primtives import ContextComms
+
 import picotron.process_group_manager as pgm
+from picotron.context_parallel.cp_communications import ContextCommunicate
 
 def ring_attention(q, k, v, sm_scale, is_causal):
     return RingAttentionFunc.apply(q, k, v, sm_scale, is_causal)
@@ -14,7 +13,7 @@ class RingAttentionFunc(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, sm_scale, is_causal):
-        comm = ContextComms("comm")
+        comm = ContextCommunicate("comm")
         #TODO(fmom): add flash attention
         #TODO(fmom): Find a better to save these tensors without cloning
         k_og = k.clone()
@@ -52,8 +51,8 @@ class RingAttentionFunc(torch.autograd.Function):
         sm_scale = ctx.sm_scale
         is_causal = ctx.is_causal
 
-        kv_comm = ContextComms("kv_comm")
-        d_kv_comm = ContextComms("d_kv_comm")
+        kv_comm = ContextCommunicate("kv_comm")
+        d_kv_comm = ContextCommunicate("d_kv_comm")
         dq, dk, dv = None, None, None
         next_dk, next_dv = None, None
         

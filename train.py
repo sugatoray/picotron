@@ -20,16 +20,23 @@ import torch, torch.distributed as dist
 from torch.optim import AdamW
 from transformers import AutoConfig
 import numpy as np
-from picotron.parallel.tensor_parallel.tensor_parallel import TensorParallel
+from picotron.tensor_parallel.tensor_parallel import TensorParallel
 import picotron.process_group_manager as pgm
 from picotron.utils import set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint
 from picotron.data import MicroBatchDataLoader
 from picotron.process_group_manager import setup_process_group_manager
-from picotron.parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
-from picotron.parallel.data_parallel.data_parallel_bucket import DataParallel
-from model import Llama
+from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
+from picotron.data_parallel.data_parallel_bucket import DataParallel
+from picotron.model import Llama
 import wandb
-from picotron.distributed.distributed_primtives import all_reduce_loss_across_dp_cp_ranks
+
+def all_reduce_loss_across_dp_cp_ranks(loss, device):
+    reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
+    # only the last stage of the pipeline parallelism contains the loss
+    # we need to average the loss among the data/context parallel group
+    if pgm.process_group_manager.pp_is_last_stage:
+        dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pgm.process_group_manager.cp_dp_group)
+    return reduced_loss.item()
 
 def train_step(model, data_loader, device):
     acc_loss = 0.0
