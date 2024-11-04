@@ -146,11 +146,12 @@ class Scheduler:
         print(f"{'-'*10}-|-{'-'*6}")
         print(f"{'Total':<10} | {total:<6}")
 
-def submit_jobs(inp_dir, qos, nb_slurm_array, only: str = None):
+def submit_jobs(inp_dir, qos, hf_token, nb_slurm_array, only: str = None):
     scheduler = Scheduler(inp_dir, qos)
 
     #TODO: batch into job arrays
     env_vars = os.environ.copy()
+    env_vars["HUGGINGFACE_TOKEN"] = hf_token
     total_jobs = len(scheduler.job_lists)
 
     if only == "fail":
@@ -212,7 +213,8 @@ if __name__ == "__main__":
     parser.add_argument('--qos', type=str, help='QOS of the jobs')
     parser.add_argument('--nb_slurm_array', type=int, default=0, help='Number of slurm arrays')
     parser.add_argument('--only', type=str, default=None, help='Filter the jobs to submit')
-    
+    parser.add_argument('--hf_token', type=str, required=True, help='Huggingface token')
+
     args = parser.parse_args()
     
-    submit_jobs(args.inp_dir, args.qos, args.nb_slurm_array, only=args.only)
+    submit_jobs(args.inp_dir, args.qos, args.hf_token, args.nb_slurm_array, only=args.only)

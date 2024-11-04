@@ -51,13 +51,16 @@ export HF_HOME=/fsx/$USER/.cache/huggingface
 export WANDB_DIR=/fsx/$USER/.cache/wandb
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 export CUDA_DEVICE_MAX_CONNECTIONS="1"
+export FI_PROVIDER="efa"
 
 module load cuda/12.1
 
 GIT_REPO="/fsx/ferdinandmom/ferdinand-hf/picotron/"
 CMD="$GIT_REPO/train.py --config {{ config }}"
 
-LAUNCHER="torchrun --nproc_per_node={{ n_proc_per_node }} --nnode={{ nodes }} --node_rank=$SLURM_NODEID --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT"
+huggingface-cli login --token $HUGGINGFACE_TOKEN
+
+LAUNCHER="torchrun --nproc_per_node={{ n_proc_per_node }} --nnode={{ nodes }} --node_rank=$SLURM_NODEID --rdzv_endpoint ${MASTER_ADDR}:${MASTER_PORT} --rdzv_backend c10d --max_restarts 0 --tee 3"
 
 # Checkout the bench_cluster branch
 cd $GIT_REPO
