@@ -119,7 +119,7 @@ class Attention(nn.Module):
         
         causal = True if q.size(2) == k.size(2) else False # During decoding phase. The lenghth of q is usually 1. 
         
-        if pgm.process_group_manager.cp_world_size > 1:
+        if os.getenv('CONTEXT_PARALLEL', '0') == '1':
             # Ring attention for context parallelism
             sm_scale = 1.0 / (q.size(-1) ** 0.5)
             out = context_parallel.ring_attention(q, k, v, sm_scale, causal).transpose(1, 2) # [batch_size, seq_length, num_heads, head_dim]

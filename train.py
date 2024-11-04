@@ -19,8 +19,8 @@ import torch.nn.functional as F
 import torch, torch.distributed as dist
 from torch.optim import AdamW
 from transformers import AutoConfig
-import numpy as np
-from picotron.tensor_parallel.tensor_parallel import TensorParallel
+from picotron.context_parallel.context_parallel import apply_context_parallel
+from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel, initialize_weight_tensor
 import picotron.process_group_manager as pgm
 from picotron.utils import set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint
 from picotron.data import MicroBatchDataLoader
@@ -194,15 +194,18 @@ if __name__ == "__main__":
     dist.barrier()
 
     if pgm.process_group_manager.tp_world_size > 1:
-        TensorParallel(model)
+        model = apply_tensor_parallel(model, init_method=initialize_weight_tensor)
 
+    if pgm.process_group_manager.cp_world_size > 1:
+        model = apply_context_parallel(model)
+        
     if pgm.process_group_manager.pp_world_size > 1:
         model = PipelineParallel(model, model_config)
 
     model.to(dtype).to(device)
         
-    # Context parallel and Data parallel both need gradient synchronization
     if pgm.process_group_manager.cp_dp_world_size > 1:
+        # Context parallel and Data parallel both need gradient synchronization
         model = DataParallelBucket(model)
     
     print("init model parallel time:", time.time()-start_time, is_print_rank=is_wandb_rank)
