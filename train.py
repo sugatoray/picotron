@@ -138,7 +138,7 @@ if __name__ == "__main__":
         num_samples=NUM_SAMPLES
     )
 
-    dist.barrier()        
+    dist.barrier()
 
     print("init dataloader time:", time.time()-start_time, is_print_rank=is_wandb_rank)
     tokens_per_step = data_loader.global_batch_size * SEQ_LEN
@@ -176,6 +176,8 @@ if __name__ == "__main__":
     model = Llama(config=model_config)
     print("init model time:", time.time()-start_time, is_print_rank=is_wandb_rank)
     dist.barrier()
+
+    start_time = time.time()
 
     if pgm.process_group_manager.tp_world_size > 1:
         model = apply_tensor_parallel(model, init_method=initialize_weight_tensor)
