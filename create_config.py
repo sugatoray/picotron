@@ -14,6 +14,7 @@ def create_single_config(
     out_dir: str,
     tp: int,
     cp: int,
+    dp: int,
     pp: int,
     pp_engine: str,
     model_name: str,
@@ -50,6 +51,7 @@ def create_single_config(
 
     config_content['distributed']['tp_size'] = tp
     config_content['distributed']['cp_size'] = cp
+    config_content['distributed']['dp_size'] = dp
     config_content['distributed']['pp_size'] = pp
     config_content['distributed']['pp_engine'] = pp_engine
 
@@ -76,6 +78,7 @@ if __name__ == "__main__":
     parser.add_argument("--out_dir", type=str, help="Output directory to store the configs", default="tmp")
     parser.add_argument("--tp", type=int, help="number of tensor parallelism", default=1)
     parser.add_argument("--cp", type=int, help="number of context parallelism", default=1)
+    parser.add_argument("--dp", type=int, help="number of data parallelism", default=1)
     parser.add_argument("--pp", type=int, help="number of pipeline parallelism", default=1)
     parser.add_argument("--pp_engine", type=str, help="pipeline parallel engine", default="afab")
     parser.add_argument("--model_name", type=str, help="Model name to create configs for", default="HuggingFaceTB/SmolLM-360M-Instruct")
