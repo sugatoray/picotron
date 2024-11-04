@@ -124,20 +124,6 @@ if __name__ == "__main__":
     setup_process_group_manager(tp_size=TP_SIZE, cp_size=CP_SIZE, pp_size=PP_SIZE, dp_size=DP_SIZE)
     is_wandb_rank = pgm.process_group_manager.tp_rank == 0 and pgm.process_group_manager.dp_rank == 0 and pgm.process_group_manager.cp_rank == 0 and pgm.process_group_manager.pp_is_last_stage
 
-    dist.barrier()
-
-    set_all_seed(SEED)
-
-    model_config = AutoConfig.from_pretrained(MODEL_NAME)
-    model_config.num_hidden_layers = config["model"]["num_hidden_layers"]
-    model_config.num_attention_heads = config["model"]["num_attention_heads"]
-    model_config.num_key_value_heads = config["model"]["num_key_value_heads"]
-    model_config.max_position_embeddings = SEQ_LEN
-
-    start_time = time.time()
-    model = Llama(config=model_config)
-    print("init model time:", time.time()-start_time, is_print_rank=is_wandb_rank)
-
     set_all_seed(SEED)
     
     start_time = time.time()
@@ -180,8 +166,6 @@ if __name__ == "__main__":
             },
         )
 
-    start_time = time.time()
-   
     model_config = AutoConfig.from_pretrained(MODEL_NAME)
     model_config.num_hidden_layers = config["model"]["num_hidden_layers"]
     model_config.num_attention_heads = config["model"]["num_attention_heads"]
