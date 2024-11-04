@@ -4,8 +4,7 @@
         "cp_size": 1,
         "pp_size": 1,
         "dp_size": 1,
-        "master_addr": "localhost",
-        "master_port": 29500,
+        "pp_engine": "afab",
         "backend": "nccl",
         "use_cpu": false
     },

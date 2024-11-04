@@ -15,7 +15,7 @@ def create_single_config(
     tp: int,
     cp: int,
     pp: int,
-    dp: int,
+    pp_engine: str,
     model_name: str,
     num_hidden_layers: Optional[int],
     num_attention_heads: Optional[int],
@@ -49,7 +49,7 @@ def create_single_config(
     config_content['distributed']['tp_size'] = tp
     config_content['distributed']['cp_size'] = cp
     config_content['distributed']['pp_size'] = pp
-    config_content['distributed']['dp_size'] = dp
+    config_content['distributed']['pp_engine'] = pp_engine
 
     config_content['logging']['use_wandb'] = use_wandb
     config_content['logging']['run_name'] = exp_name
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     parser.add_argument("--tp", type=int, help="number of tensor parallelism", default=1)
     parser.add_argument("--cp", type=int, help="number of context parallelism", default=1)
     parser.add_argument("--pp", type=int, help="number of pipeline parallelism", default=1)
-    parser.add_argument("--dp", type=int, help="number of data parallelism", default=1)
+    parser.add_argument("--pp_engine", type=str, help="pipeline parallel engine", default="afab")
     parser.add_argument("--model_name", type=str, help="Model name to create configs for", default="HuggingFaceTB/SmolLM-360M-Instruct")
     parser.add_argument("--num_hidden_layers", type=int, help="Number of hidden layers", default=None)
     parser.add_argument("--num_attention_heads", type=int, help="Number of attention heads", default=None)
@@ -94,6 +94,7 @@ if __name__ == "__main__":
         cp=args.cp,
         dp=args.dp,
         pp=args.pp,
+        pp_engine=args.pp_engine,
         model_name=args.model_name,
         num_hidden_layers=args.num_hidden_layers,
         num_attention_heads=args.num_attention_heads,

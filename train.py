@@ -88,8 +88,7 @@ if __name__ == "__main__":
     USE_WANDB = config["logging"]["use_wandb"]
     TP_SIZE = config["distributed"]["tp_size"]
     PP_SIZE = config["distributed"]["pp_size"]
-    DP_SIZE = config["distributed"]["dp_size"]
-    CP_SIZE = config["distributed"]["cp_size"]
+    PP_ENGINE = config["distributed"]["pp_engine"]
     LOAD_PATH = config["checkpoint"]["load_path"]
     CHECKPOINT_DIR = config["checkpoint"]["save_dir"]
     CHECKPOINT_FREQ = config["checkpoint"]["save_frequency"]
@@ -204,7 +203,12 @@ if __name__ == "__main__":
         optimizer.zero_grad()
         
         if pgm.process_group_manager.pp_world_size > 1:
-            loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype)
+            if PP_ENGINE == "afab":
+                loss = train_step_pipeline_afab(model, data_loader, tensor_shapes, device, dtype)
+            elif PP_ENGINE == "1f1b":
+                loss = train_step_pipeline_1f1b(model, data_loader, tensor_shapes, device, dtype)
+            else:
+                raise ValueError(f"Invalid pipeline parallel engine: {PP_ENGINE}")
         else:
             loss = train_step(model, data_loader, device)
             
