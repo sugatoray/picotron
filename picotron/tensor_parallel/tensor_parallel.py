@@ -12,10 +12,9 @@ from typing import Callable, Optional
 import picotron.process_group_manager as pgm
 from functools import partial
 import torch.nn.init as init
-from picotron.tensor_parallel.tp_communications import copy_to_model_parallel_region, gather_from_model_parallel_region, reduce_from_model_parallel_region
+from picotron.tensor_parallel.tp_communications import gather_from_model_parallel_region, linear_with_all_reduce, linear_with_async_all_reduce, reduce_from_model_parallel_region
 
 def apply_tensor_parallel(model, init_method):
-
     def _replace_module(_module, _linear_proj_name, _style, _init_method, args={}):
         assert _style in ["column", "row", 'vocab']
         linear_layer = getattr(_module, _linear_proj_name)
@@ -135,6 +134,7 @@ class ColumnParallelLinear(torch.nn.Module):
         bias: bool = False,
         init_method: Callable[[torch.Tensor], torch.Tensor] = init.xavier_normal_,
         gather_output: bool = False,
+        async_all_reduce: bool = False,
     ) -> None:
         super(ColumnParallelLinear, self).__init__()
 
@@ -143,7 +143,7 @@ class ColumnParallelLinear(torch.nn.Module):
         assert out_features % pgm.process_group_manager.tp_world_size == 0, "Hidden dimension must be divisible by the tensor parallel world size"
         self.output_size_per_partition = out_features // pgm.process_group_manager.tp_world_size
         self.gather_output = gather_output
-
+        self.async_all_reduce = async_all_reduce
         # Allocate space for the weight and bias
         # Note: torch.nn.functional.linear performs XW^T + b so we exchange the order of dimensions
         self.weight = Parameter(torch.Tensor(self.output_size_per_partition, self.in_features)) # W_i
@@ -166,8 +166,10 @@ class ColumnParallelLinear(torch.nn.Module):
         )
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:  
-        input_parallel = copy_to_model_parallel_region(input_)
-        output = F.linear(input_parallel, self.weight, self.bias) # XW_i^T + b, output is Y_i
+        if self.async_all_reduce:
+            output = linear_with_async_all_reduce(input_, self.weight, self.bias) 
+        else:
+            output = linear_with_all_reduce(input_, self.weight, self.bias) 
         if self.gather_output:
             output = gather_from_model_parallel_region(output)
         return output
