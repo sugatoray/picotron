@@ -82,9 +82,6 @@ class DataParallelBucket(nn.Module):
     def backward(self, input_tensor, output_tensor, output_tensor_grad):
         return self.module.backward(input_tensor, output_tensor, output_tensor_grad)
     
-    def get_flops(self, *args, **kwargs):
-        return self.module.get_flops(*args, **kwargs)
-    
     def register_backward_hook(self):
         """
         Registers a backward hook to manually accumulate and synchronize gradients.
