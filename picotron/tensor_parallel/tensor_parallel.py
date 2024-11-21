@@ -134,7 +134,7 @@ class ColumnParallelLinear(torch.nn.Module):
         bias: bool = False,
         init_method: Callable[[torch.Tensor], torch.Tensor] = init.xavier_normal_,
         gather_output: bool = False,
-        async_all_reduce: bool = False,
+        async_all_reduce: bool = True,
     ) -> None:
         super(ColumnParallelLinear, self).__init__()
 
