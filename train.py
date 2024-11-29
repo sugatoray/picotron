@@ -23,12 +23,15 @@ from picotron.context_parallel.context_parallel import apply_context_parallel
 from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel, initialize_weight_tensor
 import picotron.process_group_manager as pgm
 from picotron.utils import set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint
+from picotron.checkpoint import init_model_with_dematerialized_weights, initialize_model_with_materialized_weights
 from picotron.data import MicroBatchDataLoader
 from picotron.process_group_manager import setup_process_group_manager
 from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1b, train_step_pipeline_afab, PipelineParallel
 from picotron.data_parallel.data_parallel import DataParallelBucket
 from picotron.model import Llama
 import wandb
+import lovely_tensors as lt; lt.monkey_patch()
+
 
 def all_reduce_loss_across_dp_cp_ranks(loss, device):
     reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
@@ -66,7 +69,7 @@ def train_step(model, data_loader, device):
 
     return acc_loss
 
-if __name__ == "__main__":    
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="", help="Path to config file")
     args = parser.parse_args()
@@ -173,20 +176,22 @@ if __name__ == "__main__":
     model_config.max_position_embeddings = SEQ_LEN
 
     start_time = time.time()
-    model = Llama(config=model_config)
-    print("init model time:", time.time()-start_time, is_print_rank=is_wandb_rank)
-    dist.barrier()
-
-    start_time = time.time()
+    with init_model_with_dematerialized_weights():
+        model = Llama(config=model_config)
 
     if pgm.process_group_manager.tp_world_size > 1:
+        #TODO: remove the initialize_weight_tensor and do it at initialize_model_with_materialized_weights() level
         model = apply_tensor_parallel(model, init_method=initialize_weight_tensor)
+    
+    if pgm.process_group_manager.pp_world_size > 1:
+        model = PipelineParallel(model, model_config)
+
+    model = initialize_model_with_materialized_weights(model, model_config, checkpoint_path="/fsx/ferdinandmom/hf_model_ckpt/TinyLlama-1.1B-Chat-v0.1", initialize_weight_tensor_func=initialize_weight_tensor)
+    print("init model time:", time.time()-start_time, is_print_rank=is_wandb_rank)
+    start_time = time.time()
 
     if pgm.process_group_manager.cp_world_size > 1:
         model = apply_context_parallel(model)
-        
-    if pgm.process_group_manager.pp_world_size > 1:
-        model = PipelineParallel(model, model_config)
 
     model.to(dtype).to(device)
         

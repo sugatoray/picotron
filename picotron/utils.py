@@ -4,6 +4,8 @@ import random
 import numpy as np
 import builtins
 import fcntl
+import json
+import torch.nn as nn
 import picotron.process_group_manager as pgm
 
 def print(*args, is_print_rank=True, **kwargs):
@@ -32,6 +34,18 @@ def to_readable_format(num, precision=2):
         return f"{num / 1e3:.{precision}f}K"
     else:
         return f"{num:.{precision}f}"
+    
+def assert_no_meta_tensors(model):
+    meta_tensors = []
+    for name, param in model.named_parameters():
+        if param.device == torch.device("meta"):
+            meta_tensors.append(f"Parameter '{name}' with shape {param.shape}")
+    
+    for name, buffer in model.named_buffers():
+        if buffer.device == torch.device("meta"):
+            meta_tensors.append(f"Buffer '{name}' with shape {buffer.shape}")
+    
+    assert len(meta_tensors) == 0, f"Found {len(meta_tensors)} meta tensors:\n" + "\n".join(meta_tensors)
 
 def save_checkpoint(model, optimizer, trained_steps, trained_tokens, out_dir):
     """Save the model/optimizer states/steps to a checkpoint file."""
