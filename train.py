@@ -20,7 +20,7 @@ import torch, torch.distributed as dist
 from torch.optim import AdamW
 from transformers import AutoConfig
 from picotron.context_parallel.context_parallel import apply_context_parallel
-from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel, initialize_weight_tensor
+from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel
 import picotron.process_group_manager as pgm
 from picotron.utils import set_all_seed, print, to_readable_format
 from picotron.checkpoint import CheckpointManager
@@ -176,20 +176,20 @@ if __name__ == "__main__":
     model_config.num_key_value_heads = config["model"]["num_key_value_heads"]
     model_config.max_position_embeddings = SEQ_LEN
 
+    #TODO: try 70B next
     start_time = time.time()
+
     with init_model_with_dematerialized_weights():
         model = Llama(config=model_config)
 
-    if pgm.process_group_manager.tp_world_size > 1:
-        #TODO: remove the initialize_weight_tensor and do it at initialize_model_with_materialized_weights() level
-        model = apply_tensor_parallel(model, init_method=initialize_weight_tensor)
-    
-    if pgm.process_group_manager.pp_world_size > 1:
-        model = PipelineParallel(model, model_config)
+        if pgm.process_group_manager.tp_world_size > 1:
+            model = apply_tensor_parallel(model)
 
-    model = initialize_model_with_materialized_weights(model, model_config, checkpoint_path="/fsx/ferdinandmom/hf_model_ckpt/TinyLlama-1.1B-Chat-v0.1", initialize_weight_tensor_func=initialize_weight_tensor)
-    print("init model time:", time.time()-start_time, is_print_rank=is_wandb_rank)
-    start_time = time.time()
+        if pgm.process_group_manager.pp_world_size > 1:
+            model = PipelineParallel(model, model_config)
+
+    #TODO: dont harcode the path of checkpoint_path. Maybe rename "safetensor_path" ?
+    model = initialize_model_with_materialized_weights(model, model_config, checkpoint_path="/fsx/ferdinandmom/hf_model_ckpt/cosmo-1b")
 
     if pgm.process_group_manager.cp_world_size > 1:
         model = apply_context_parallel(model)
@@ -201,7 +201,6 @@ if __name__ == "__main__":
         model = DataParallelBucket(model)
     
     print("init model parallel time:", time.time()-start_time, is_print_rank=is_wandb_rank)
-    start_time = time.time()
     
     model.train()
     

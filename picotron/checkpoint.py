@@ -44,8 +44,7 @@ def init_model_with_dematerialized_weights(include_buffers: bool = False):
         if include_buffers:
             nn.Module.register_buffer = old_register_buffer
 
-
-def initialize_model_with_materialized_weights(model, model_config, checkpoint_path, initialize_weight_tensor_func = None):
+def initialize_model_with_materialized_weights(model, model_config, checkpoint_path):
     """Initialize model with correct tensor shapes but random weights"""
 
     initialization_manager = InitializationManager(model, model_config)
@@ -56,36 +55,34 @@ def initialize_model_with_materialized_weights(model, model_config, checkpoint_p
     
     safetensors_checkpoint_path = os.path.join(checkpoint_path, "model.safetensors")
     with safe_open(safetensors_checkpoint_path, framework="pytorch", device="cpu") as f:
-        safetensors_names = f.keys()
         
-        if len(safetensors_names) > len(model_layer_name_sft_format):
-            print(f"Warning: Checkpoint has {len(safetensors_names)} layers but model only has {len(model_layer_name_sft_format)} layers.")
+        if len(f.keys()) > len(model_layer_name_sft_format):
+            print(f"Warning: Checkpoint has {len(f.keys())} layers but model only has {len(model_layer_name_sft_format)} layers.")
 
-        # Create state dict with random tensors
         state_dict = {}
+        # Create state dict
         for sft_name in model_layer_name_sft_format:
-            # if is_tensor_belongs_to_current_pp_rank(sft_name, model_layer_name_sft_format):
             hf_name = initialization_manager.convert_safetensors_to_hf_name(sft_name)
             tensor = f.get_tensor(sft_name)
             tensor = initialization_manager.adjust_tensor_size(tensor, hf_name)
-
-            #TODO: initialize_weight_tensor_func
-            #TODO: is layernorm init the same way as q k v ?
-            state_dict[hf_name] = torch.randn_like(tensor)
+            state_dict[hf_name] = torch.zeros_like(tensor)
     
-    #TODO: Handle Tensor Parallel splitting if needed
-
     dist.barrier()
     model.load_state_dict(state_dict, strict=True, assign=True)
     dist.barrier()
     assert_no_meta_tensors(model)
+
+    initialization_manager.init_model_parameters()
     return model
 
 class InitializationManager:
     def __init__(self, model, model_config):
         self.model = model
         self.model_config = model_config
-        
+
+    def init_model_parameters(self):
+        self.model.reset_parameters()
+
     def get_layer_names_in_sft_format(self):
         """Get layer names in safetensors format based on model's layer distribution."""
         decoder_components = [
@@ -102,6 +99,7 @@ class InitializationManager:
         
         # Generate base layer names
         layer_names = []
+        #TODO: what if there is only tensor parallel that is activated ?
         base_names = [f"model.layers.{id}" for id in self.model.layer_distribution]
         for layer in base_names:
             layer_names.extend(f"{layer}.{component}.weight" for component in decoder_components)

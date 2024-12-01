@@ -1,5 +1,6 @@
 import os
-import torch 
+import math
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from picotron.context_parallel import context_parallel
@@ -39,8 +40,12 @@ class TritonRMSNorm(nn.Module):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = nn.Parameter(torch.empty(hidden_size))
         self.register_parameter("bias", None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.ones_(self.weight)
 
     def forward(
         self, hidden_states, residual=None, dropout_p=0.0, prenorm=False, residual_in_fp32=False, return_dropout_mask=False
@@ -64,8 +69,13 @@ class LlamaRMSNorm(nn.Module):
         LlamaRMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.weight = nn.Parameter(torch.empty(hidden_size))
         self.variance_epsilon = eps
+
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        nn.init.ones_(self.weight)
 
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
@@ -92,8 +102,22 @@ class Attention(nn.Module):
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.layer_idx = layer_idx
         
+        self.reset_parameters()
+
         ## TODO support mask
     
+    def reset_parameters(self):
+
+        def _init_weights(tensor):
+            k = 1 / tensor.size(1)
+            bound = math.sqrt(k)
+            torch.nn.init.uniform_(tensor, -bound, bound)
+            
+        _init_weights(self.q_proj.weight)
+        _init_weights(self.k_proj.weight)
+        _init_weights(self.v_proj.weight)
+        _init_weights(self.out_proj.weight)
+
     def forward(self, x, cos, sin, attention_mask=None, position_ids=None):
         batch_size, seq_length, hidden_dim = x.size()
         q = self.q_proj(x) # [batch_size, seq_length, num_heads*head_dim]
@@ -119,6 +143,7 @@ class Attention(nn.Module):
         
         causal = True if q.size(2) == k.size(2) else False # During decoding phase. The lenghth of q is usually 1. 
         
+        # TODO: replace everything with flex attention
         if os.getenv('CONTEXT_PARALLEL', '0') == '1':
             # Ring attention for context parallelism
             sm_scale = 1.0 / (q.size(-1) ** 0.5)
@@ -143,6 +168,19 @@ class MLP(nn.Module):
         self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
 
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+
+        def _init_weights(tensor):
+            k = 1 / tensor.size(1)
+            bound = math.sqrt(k)
+            torch.nn.init.uniform_(tensor, -bound, bound)
+
+        _init_weights(self.up_proj.weight)
+        _init_weights(self.gate_proj.weight)
+        _init_weights(self.down_proj.weight)
+ 
     def forward(self, x):
         #TODO: dont do single line operations as it is harder to debug
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
@@ -169,7 +207,23 @@ class DecoderLayer(nn.Module):
         x = x + self.attention(self.input_layernorm(x), cos, sin, attention_mask, position_ids) # Attention 
         x = x + self.mlp(self.post_attention_layernorm(x)) # MLP
         return x
-    
+
+class Embedding(nn.Module):
+    def __init__(self, num_embeddings, embedding_dim, padding_idx=None):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.padding_idx = padding_idx
+        
+        self.weight = nn.Parameter(torch.empty(num_embeddings, embedding_dim))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.normal_(self.weight, mean=0.0, std=1.0)
+
+    def forward(self, x):
+        return F.embedding(x, self.weight, self.padding_idx,)
+
 class Llama(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
@@ -188,12 +242,26 @@ class Llama(nn.Module):
         self.model_config = config
         
         # modules
-        self.embedding = nn.Embedding(self.vocab_size, self.hidden_size)
+        self.embedding = Embedding(self.vocab_size, self.hidden_size)
         self.decoder_layers = nn.ModuleList([DecoderLayer(config,layer_idx = i) for i in range(self.num_layers)])
         self.final_proj = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
         RMSNorm = LlamaRMSNorm if os.getenv('FLASH_ATTEN', '1') != '1' else TritonRMSNorm
         self.final_norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.embedding.reset_parameters()
         
+        for layer in self.decoder_layers:
+            layer.input_layernorm.reset_parameters()
+            layer.attention.reset_parameters()
+            layer.post_attention_layernorm.reset_parameters()
+            layer.mlp.reset_parameters()
+
+        self.final_norm.reset_parameters()
+        self.final_proj.reset_parameters
+
     def forward(self, input_ids, attention_mask=None, position_ids: torch.Tensor = None):
         x = self.embedding(input_ids)
         for layer in self.decoder_layers:
