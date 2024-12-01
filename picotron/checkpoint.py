@@ -45,7 +45,7 @@ def init_model_with_dematerialized_weights(include_buffers: bool = False):
         if include_buffers:
             nn.Module.register_buffer = old_register_buffer
 
-def initialize_model_with_materialized_weights(model, model_config, hf_hub_checkpoint_path):
+def init_model_with_materialized_weights(model, model_config, hf_hub_checkpoint_path):
     #Initialize model with correct tensor shapes but random weights
     initialization_manager = InitializationManager(model, model_config)
     layer_names = initialization_manager.get_layer_names_in_sft_format()
