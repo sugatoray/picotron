@@ -159,6 +159,50 @@ class InitializationManager:
             result = re.sub(pattern, replacement, result)
         return result
 
-#TODO: Implement and Move save/load checkpoint here
-# class CheckpointManager:
-#     pass
+class CheckpointManager:
+    def __init__(self):
+        self.tp_rank = pgm.process_group_manager.tp_rank
+        self.pp_rank = pgm.process_group_manager.pp_rank
+        self.tp_world_size = pgm.process_group_manager.tp_world_size
+        self.pp_world_size = pgm.process_group_manager.pp_world_size
+        self.cp_dp_world_size = pgm.process_group_manager.cp_dp_world_size
+        self.dp_rank = pgm.process_group_manager.dp_rank
+        self.cp_rank = pgm.process_group_manager.cp_rank
+
+    def _get_checkpoint_path(self, out_dir):
+        ckpt_name = f"weights_tp_rank_world_size={self.tp_rank}_{self.tp_world_size}_pp_rank_world_size={self.pp_rank}_{self.pp_world_size}.pth"
+        return os.path.join(out_dir, ckpt_name)
+
+    def save_checkpoint(self, model, optimizer, trained_steps, trained_tokens, out_dir):
+        """Save the model/optimizer states/steps to a checkpoint file."""
+        path = self._get_checkpoint_path(out_dir)
+        
+        # Only DP/CP rank 0 will save the model, the weights are the same across all ranks
+        if self.dp_rank == 0 and self.cp_rank == 0:
+            os.makedirs(out_dir, exist_ok=True)
+            raw_model = model.module if self.cp_dp_world_size > 1 else model
+            checkpoint = {
+                'model': raw_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'trained_steps': trained_steps,
+                'trained_tokens': trained_tokens
+            }
+            torch.save(checkpoint, path)
+
+    def load_checkpoint(self, model, optimizer, out_dir):
+        """Load the model/optimizer states from the latest checkpoint. Assume the topology is the same."""
+        path = self._get_checkpoint_path(out_dir)
+        
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Checkpoint not found at {path}")
+            
+        checkpoint = torch.load(path)
+
+        # Load model weights
+        raw_model = model.module if self.cp_dp_world_size > 1 else model
+        raw_model.load_state_dict(checkpoint['model'])
+        
+        # Load optimizer state
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        
+        return checkpoint['trained_steps'], checkpoint['trained_tokens']

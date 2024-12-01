@@ -22,7 +22,8 @@ from transformers import AutoConfig
 from picotron.context_parallel.context_parallel import apply_context_parallel
 from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel, initialize_weight_tensor
 import picotron.process_group_manager as pgm
-from picotron.utils import set_all_seed, print, to_readable_format, save_checkpoint, load_checkpoint
+from picotron.utils import set_all_seed, print, to_readable_format
+from picotron.checkpoint import CheckpointManager
 from picotron.checkpoint import init_model_with_dematerialized_weights, initialize_model_with_materialized_weights
 from picotron.data import MicroBatchDataLoader
 from picotron.process_group_manager import setup_process_group_manager
@@ -213,10 +214,12 @@ if __name__ == "__main__":
         extra_args = dict(fused=True) if use_fused else dict()
 
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, **extra_args)
+    
+    checkpoint_manager = CheckpointManager()
 
     trained_tokens, step = 0, 0
     if LOAD_PATH:
-        step, trained_tokens = load_checkpoint(model, optimizer, LOAD_PATH)
+        step, trained_tokens = checkpoint_manager.load_checkpoint(model, optimizer, LOAD_PATH)
     
     dist.barrier()
     #TODO: Add activation checkpointing
@@ -263,7 +266,7 @@ if __name__ == "__main__":
                     "memory_usage": torch.cuda.memory_reserved() / 1e9, "trained_tokens": trained_tokens})
         
         if step % CHECKPOINT_FREQ == 0:
-            save_checkpoint(model, optimizer, step, trained_tokens, CHECKPOINT_DIR+f"/{step}")
+            checkpoint_manager.save_checkpoint(model, optimizer, step, trained_tokens, CHECKPOINT_DIR+f"/{step}")
         
         if step >= TOTAL_TRAIN_STEPS:
             break
