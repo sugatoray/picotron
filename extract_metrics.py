@@ -63,7 +63,7 @@ def process_file(filepath):
     tokens_s_gpu_values = []
     with open(filepath, 'r') as f:
         for line in f:
-            if '[default0]:[rank 0]' in line:
+            if re.search(r'\[default\d+\]:\[rank \d+\]', line):
                 tokens_s_gpu = parse_log_line(line)
                 if tokens_s_gpu is not None:
                     tokens_s_gpu_values.append(tokens_s_gpu)
