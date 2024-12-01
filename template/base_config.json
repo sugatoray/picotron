@@ -35,7 +35,8 @@
     "checkpoint": {
         "save_dir": "ckpt",
         "save_frequency": 300,
-        "load_path": ""
+        "load_path": "",
+        "hf_hub_checkpoint_path": ""
     },
     "logging": {
         "use_wandb": false,

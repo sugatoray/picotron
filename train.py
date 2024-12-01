@@ -33,15 +33,6 @@ from picotron.model import Llama
 import wandb
 import lovely_tensors as lt; lt.monkey_patch()
 
-
-def all_reduce_loss_across_dp_cp_ranks(loss, device):
-    reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
-    # only the last stage of the pipeline parallelism contains the loss
-    # we need to average the loss among the data/context parallel group
-    if pgm.process_group_manager.pp_is_last_stage:
-        dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pgm.process_group_manager.cp_dp_group)
-    return reduced_loss.item()
-
 def train_step(model, data_loader, device):
     acc_loss = 0.0
     
@@ -87,6 +78,7 @@ if __name__ == "__main__":
     assert (dtype == torch.bfloat16 and os.getenv("FLASH_ATTEN") == "1") or os.getenv("FLASH_ATTEN") != "1", "Kernel operations requires dtype=torch.bfloat16"
     
     # hyperparameters
+    #TODO: dont need this many variables
     SEQ_LEN = config["training"]["seq_length"]
     MICRO_BATCH_SIZE = config["training"]["micro_batch_size"]
     LEARNING_RATE = config["training"]["learning_rate"]
@@ -189,7 +181,7 @@ if __name__ == "__main__":
             model = PipelineParallel(model, model_config)
 
     #TODO: dont harcode the path of checkpoint_path. Maybe rename "safetensor_path" ?
-    model = initialize_model_with_materialized_weights(model, model_config, checkpoint_path="/fsx/ferdinandmom/hf_model_ckpt/cosmo-1b")
+    model = initialize_model_with_materialized_weights(model, model_config, hf_hub_checkpoint_path=config["checkpoint"]["hf_hub_checkpoint_path"])
 
     if pgm.process_group_manager.cp_world_size > 1:
         model = apply_context_parallel(model)
@@ -222,7 +214,16 @@ if __name__ == "__main__":
     
     dist.barrier()
     #TODO: Add activation checkpointing
+        
+    def _all_reduce_loss_across_dp_cp_ranks(loss, device):
+        reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
+        # only the last stage of the pipeline parallelism contains the loss
+        # we need to average the loss among the data/context parallel group
+        if pgm.process_group_manager.pp_is_last_stage:
+            dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pgm.process_group_manager.cp_dp_group)
+        return reduced_loss.item()
     
+    #TODO: try/except for better error handling
     while MAX_TOKENS is None or trained_tokens < MAX_TOKENS:
         #TODO: Add epoch support
         # data_loader.set_epoch(step)
@@ -239,7 +240,7 @@ if __name__ == "__main__":
         else:
             loss = train_step(model, data_loader, device)
             
-        loss = all_reduce_loss_across_dp_cp_ranks(loss, device)
+        loss = _all_reduce_loss_across_dp_cp_ranks(loss, device)
         
         optimizer.step()
         trained_tokens += tokens_per_step

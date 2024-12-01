@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -44,35 +45,50 @@ def init_model_with_dematerialized_weights(include_buffers: bool = False):
         if include_buffers:
             nn.Module.register_buffer = old_register_buffer
 
-def initialize_model_with_materialized_weights(model, model_config, checkpoint_path):
-    """Initialize model with correct tensor shapes but random weights"""
-
+def initialize_model_with_materialized_weights(model, model_config, hf_hub_checkpoint_path):
+    #Initialize model with correct tensor shapes but random weights
     initialization_manager = InitializationManager(model, model_config)
-
-    # convert layer distribution ids to layer_name (using the same naming convention as in safetensors)
-    model_layer_name_sft_format = initialization_manager.get_layer_names_in_sft_format()
-    print(f"Rank {pgm.process_group_manager.pp_rank} responsible for layers: {model_layer_name_sft_format}")
+    layer_names = initialization_manager.get_layer_names_in_sft_format()
+    print(f"Rank {pgm.process_group_manager.pp_rank} responsible for layers: {layer_names}")
     
-    safetensors_checkpoint_path = os.path.join(checkpoint_path, "model.safetensors")
-    with safe_open(safetensors_checkpoint_path, framework="pytorch", device="cpu") as f:
+    state_dict = {}
+
+    def _process_tensor(sft_name, tensor_handle):
+        hf_name = initialization_manager.convert_safetensors_to_hf_name(sft_name)
+        tensor = tensor_handle.get_tensor(sft_name)
+        tensor = initialization_manager.adjust_tensor_size(tensor, hf_name)
+        return hf_name, torch.zeros_like(tensor)
+
+    index_path = os.path.join(hf_hub_checkpoint_path, "model.safetensors.index.json")
+
+    if os.path.exists(index_path): # Handle sharded checkpoint
+        with open(index_path, 'r') as f:
+            index = json.load(f)
         
-        if len(f.keys()) > len(model_layer_name_sft_format):
-            print(f"Warning: Checkpoint has {len(f.keys())} layers but model only has {len(model_layer_name_sft_format)} layers.")
+        for sft_name in layer_names:
+            shard_path = os.path.join(hf_hub_checkpoint_path, index['weight_map'][sft_name])
+            with safe_open(shard_path, framework="pytorch", device="cpu") as f:
+                hf_name, tensor = _process_tensor(sft_name, f)
+                state_dict[hf_name] = tensor
 
-        state_dict = {}
-        # Create state dict
-        for sft_name in model_layer_name_sft_format:
-            hf_name = initialization_manager.convert_safetensors_to_hf_name(sft_name)
-            tensor = f.get_tensor(sft_name)
-            tensor = initialization_manager.adjust_tensor_size(tensor, hf_name)
-            state_dict[hf_name] = torch.zeros_like(tensor)
-    
+    else: # Handle single file checkpoint
+        safetensors_path = os.path.join(hf_hub_checkpoint_path, "model.safetensors")
+        with safe_open(safetensors_path, framework="pytorch", device="cpu") as f:
+            if len(f.keys()) > len(layer_names):
+                print(f"Warning: Checkpoint has {len(f.keys())} layers but model only has {len(layer_names)} layers.")
+            
+            for sft_name in layer_names:
+                hf_name, tensor = _process_tensor(sft_name, f)
+                state_dict[hf_name] = tensor
+
+    # Synchronize across distributed processes and load weights
     dist.barrier()
     model.load_state_dict(state_dict, strict=True, assign=True)
     dist.barrier()
+    
     assert_no_meta_tensors(model)
-
     initialization_manager.init_model_parameters()
+    
     return model
 
 class InitializationManager:
