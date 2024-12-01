@@ -160,7 +160,6 @@ class Attention(nn.Module):
         out = self.out_proj(out) # [batch_size, seq_length, hidden_dim]
         return out
 
-
 class MLP(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
