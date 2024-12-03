@@ -7,7 +7,7 @@ import torch.distributed as dist
 from safetensors import safe_open
 import contextlib
 
-from picotron.utils import assert_no_meta_tensors
+from picotron.utils import assert_no_meta_tensors, print
 import picotron.process_group_manager as pgm
 
 from picotron.pipeline_parallel.pipeline_parallel import PipelineParallel
@@ -47,12 +47,20 @@ def init_model_with_dematerialized_weights(include_buffers: bool = False):
         if include_buffers:
             nn.Module.register_buffer = old_register_buffer
 
-def init_model_with_materialized_weights(model, model_config, hf_hub_checkpoint_path):
+def init_model_with_materialized_weights(model, model_config, hf_hub_safetensors_path):
+
+    if hf_hub_safetensors_path is None:
+        raise Exception("Path to safetensors files is required to initialize model with materialized weights.")
+
     #Initialize model with correct tensor shapes but random weights
     initialization_manager = InitializationManager(model, model_config)
     layer_names = initialization_manager.get_layer_names_in_sft_format()
-    print(f"Rank {pgm.process_group_manager.pp_rank} responsible for layers: {layer_names}")
+
+    print(f"Rank {pgm.process_group_manager.pp_rank} responsible for layers: {len(layer_names)}")
     
+    if len(layer_names) == 0:
+        raise Exception("Some ranks has no layers. There are too many ranks and not enough layers to distribute.")
+
     state_dict = {}
 
     def _process_tensor(sft_name, tensor_handle):
@@ -61,20 +69,20 @@ def init_model_with_materialized_weights(model, model_config, hf_hub_checkpoint_
         tensor = initialization_manager.adjust_tensor_size(tensor, hf_name)
         return hf_name, torch.zeros_like(tensor)
 
-    index_path = os.path.join(hf_hub_checkpoint_path, "model.safetensors.index.json")
+    index_path = os.path.join(hf_hub_safetensors_path, "model.safetensors.index.json")
 
     if os.path.exists(index_path): # Handle sharded checkpoint
         with open(index_path, 'r') as f:
             index = json.load(f)
         
         for sft_name in layer_names:
-            shard_path = os.path.join(hf_hub_checkpoint_path, index['weight_map'][sft_name])
+            shard_path = os.path.join(hf_hub_safetensors_path, index['weight_map'][sft_name])
             with safe_open(shard_path, framework="pytorch", device="cpu") as f:
                 hf_name, tensor = _process_tensor(sft_name, f)
                 state_dict[hf_name] = tensor
 
     else: # Handle single file checkpoint
-        safetensors_path = os.path.join(hf_hub_checkpoint_path, "model.safetensors")
+        safetensors_path = os.path.join(hf_hub_safetensors_path, "model.safetensors")
         with safe_open(safetensors_path, framework="pytorch", device="cpu") as f:
             if len(f.keys()) > len(layer_names):
                 print(f"Warning: Checkpoint has {len(f.keys())} layers but model only has {len(layer_names)} layers.")
