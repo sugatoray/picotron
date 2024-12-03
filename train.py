@@ -108,6 +108,7 @@ if __name__ == "__main__":
         dataset_name=config["dataset"]["name"],
         tokenizer_name=config["model"]["name"],
         grad_acc_steps=config["training"]["gradient_accumulation_steps"],
+        device=device,
         num_workers=config["dataset"]["num_workers"],
         num_proc=config["dataset"]["num_proc"],
         num_samples=config["training"]["num_samples"]

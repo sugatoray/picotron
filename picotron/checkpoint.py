@@ -56,7 +56,7 @@ def init_model_with_materialized_weights(model, model_config, hf_hub_safetensors
     initialization_manager = InitializationManager(model, model_config)
     layer_names = initialization_manager.get_layer_names_in_sft_format()
 
-    print(f"Rank {pgm.process_group_manager.pp_rank} responsible for layers: {len(layer_names)}")
+    print(f"Rank {pgm.process_group_manager.pp_rank} responsible for {len(layer_names)} layers")
     
     if len(layer_names) == 0:
         raise Exception("Some ranks has no layers. There are too many ranks and not enough layers to distribute.")

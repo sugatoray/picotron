@@ -1,14 +1,16 @@
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 import numpy as np
 from functools import partial
 from datasets import Features, Sequence, Value, load_dataset
 from transformers import AutoTokenizer
+from picotron.utils import print
 
 import picotron.process_group_manager as pgm
 
 class MicroBatchDataLoader(DataLoader):
-    def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc_steps, split="train", num_samples=None):
+    def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc_steps, device, split="train", num_samples=None):
         
         self.micro_batch_size = micro_batch_size
         self.seq_length = seq_length
@@ -17,9 +19,20 @@ class MicroBatchDataLoader(DataLoader):
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
         
         self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
-
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.dataset = load_dataset(dataset_name, split=split)
+
+        if pgm.process_group_manager.global_rank == 0:
+            print(f"rank: {pgm.process_group_manager.global_rank}: Creating tokenizer")
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+            objects = [self.tokenizer]
+        else:
+            print(f"rank: {pgm.process_group_manager.global_rank}: Initialized tokenizer to None")
+            objects = [None]
+
+        print(f"rank: {pgm.process_group_manager.global_rank}: Broadcasting tokenizer to all ranks", is_print_rank=pgm.process_group_manager.global_rank==0)
+        dist.broadcast_object_list(objects, src=0, device=device)
+        self.tokenizer = objects[0]
+        
         if num_samples:
             self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
         
