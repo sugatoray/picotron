@@ -4,7 +4,7 @@
         "cp_size": 1,
         "pp_size": 1,
         "dp_size": 1,
-        "pp_engine": "afab",
+        "pp_engine": "1f1b",
         "backend": "nccl",
         "use_cpu": false
     },
