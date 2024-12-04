@@ -53,28 +53,46 @@ def from_readable_format(formatted_str):
         raise ValueError(f"Unknown suffix: {suffix}")
 
 def parse_log_line(line):
-    tokens_s_gpu_match = re.search(r'Tokens/s/GPU: ([\d.]+[KMBT]?)', line)
+    tokens_s_gpu_match = re.search(r'Tokens/s/GPU:\s*([\d.]+[KMBT]?)', line)
+    mfu_match = re.search(r'MFU:\s+(\d+\.\d+)%', line)
+
+    mfu_value, tokens_value = None, None
+
+    if mfu_match:
+        mfu_value = mfu_match.group(1)
+        mfu_value = float(mfu_value)
+    
     if tokens_s_gpu_match:
-        value = tokens_s_gpu_match.group(1)
-        return from_readable_format(value)
-    return None
+        tokens_value = tokens_s_gpu_match.group(1)
+    
+    return mfu_value, from_readable_format(tokens_value)
 
 def process_file(filepath):
     tokens_s_gpu_values = []
+    mfu_values = []
     with open(filepath, 'r') as f:
         for line in f:
             if re.search(r'\[default\d+\]:\[rank \d+\]', line):
-                tokens_s_gpu = parse_log_line(line)
-                if tokens_s_gpu is not None:
-                    tokens_s_gpu_values.append(tokens_s_gpu)
+                mfu_value, tokens_s_gpu_value = parse_log_line(line)
+                if tokens_s_gpu_value is not None:
+                    tokens_s_gpu_values.append(tokens_s_gpu_value)
+                if mfu_value is not None:
+                    mfu_values.append(mfu_value)
     
-    return int(round(np.mean(tokens_s_gpu_values))) if tokens_s_gpu_values else None
+    #NOTE: skip 3 first beginning (warmup)
+    if len(tokens_s_gpu_values) < 3 and len(mfu_values) < 3:
+        print(f"Warning: Not enough data points for {filepath}")
+        return None, None
+    tokens_s_gpu = int(round(np.mean(tokens_s_gpu_values[3:]))) if tokens_s_gpu_values else None
+    mfu = int(round(np.mean(mfu_values[3:]))) if mfu_values else None
+
+    return mfu, tokens_s_gpu
 
 def write_csv(data, output_filepath):
     if not data:
         return
     
-    fieldnames = ['run_name', 'status', 'dp', 'tp', 'pp', 'micro_batch_size', 'grad_acc', 'seq_len', 'avg_tokens_s_gpu']
+    fieldnames = ['run_name', 'status', 'dp', 'tp', 'pp', 'micro_batch_size', 'grad_acc', 'seq_len', 'avg_tokens_s_gpu', 'avg_mfu']
     with open(output_filepath, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -101,7 +119,8 @@ def create_subdirectory_metrics(input_folder):
         output_csv = os.path.join(dir_path, 'metrics.csv')
         
         params = parse_folder_name(dir_name)
-        avg_tokens_s_gpu = process_file(file_path)
+        print(f"Processing {file_path}...")
+        avg_mfu, avg_tokens_s_gpu = process_file(file_path)
         status = read_status(os.path.join(dir_path, 'status.txt'))
         
         params['run_name'] = dir_name
@@ -113,6 +132,12 @@ def create_subdirectory_metrics(input_folder):
 
         if avg_tokens_s_gpu is not None:
             params['avg_tokens_s_gpu'] = avg_tokens_s_gpu
+            write_csv(params, output_csv)
+            processed_dirs.append(dir_path)
+            print(f"Processed {file_path} -> Created metrics.csv")
+        
+        if avg_mfu is not None:
+            params['avg_mfu'] = avg_mfu
             write_csv(params, output_csv)
             processed_dirs.append(dir_path)
             print(f"Processed {file_path} -> Created metrics.csv")
@@ -147,17 +172,20 @@ def aggregate_metrics(input_folder):
                         reader = csv.DictReader(f)
                         metrics_data = next(reader)
                         data['avg_tokens_s_gpu'] = int(metrics_data['avg_tokens_s_gpu'])
+                        data['avg_mfu'] = int(metrics_data['avg_mfu'])
                 except:
                     data['avg_tokens_s_gpu'] = -1
+                    data['avg_mfu'] = -1
             else:
                 data['avg_tokens_s_gpu'] = -1
+                data['avg_mfu'] = -1
 
             aggregated_data.append(data)
     
         # Write global metrics file
         output_file = os.path.join(top_dir_path, 'global_metrics.csv')
         fieldnames = ['run_name', 'status', 'dp', 'tp', 'pp', 'micro_batch_size', 
-                    'grad_acc', 'seq_len', 'avg_tokens_s_gpu']
+                    'grad_acc', 'seq_len', 'avg_tokens_s_gpu', 'avg_mfu']
         
         with open(output_file, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
