@@ -5,6 +5,10 @@ Ref: https://github.com/facebookresearch/fairscale/tree/main/fairscale
 from typing import Tuple
 import torch
 
+def merge_first_two_dims(grad_output: torch.Tensor, input_: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Merge the first two dimensions of tensors."""
+    return grad_output.contiguous().view(-1, *grad_output.shape[2:]), input_.contiguous().view(-1, *input_.shape[2:])
+
 def divide_and_check_no_remainder(numerator: int, denominator: int) -> int:
     """Ensure that numerator is divisible by the denominator and return
     the division value."""
