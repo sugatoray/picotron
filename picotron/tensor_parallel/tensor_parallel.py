@@ -69,7 +69,7 @@ class ColumnParallelLinear(torch.nn.Module):
         out_features: int,
         bias: bool = False,
         gather_output: bool = False,
-        async_all_reduce: bool = True,
+        async_all_reduce: bool = False,
     ) -> None:
         super(ColumnParallelLinear, self).__init__()
 
@@ -113,11 +113,11 @@ class ColumnParallelLinear(torch.nn.Module):
         weight_list = torch.split(master_weight, self.output_size_per_partition, dim=0)
         self.weight.data = weight_list[self.tp_rank].contiguous()
     
-    def forward(self, input: torch.Tensor) -> torch.Tensor:  
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  
         if self.async_all_reduce:
-            output = linear_with_async_all_reduce(input, self.weight, self.bias) 
+            output = linear_with_async_all_reduce(x, self.weight, self.bias) 
         else:
-            output = linear_with_all_reduce(input, self.weight, self.bias) 
+            output = linear_with_all_reduce(x, self.weight, self.bias) 
         if self.gather_output:
             output = Gather.apply(output)
         return output
@@ -181,9 +181,9 @@ class RowParallelLinear(nn.Module):
         weight_list = torch.split(master_weight, self.input_size_per_partition, dim=1)
         self.weight.data = weight_list[self.tp_rank].contiguous()
 
-    def forward(self, input):
+    def forward(self, x):
         # X_i * W_i^T + b
-        output_parallel = F.linear(input, self.weight)
+        output_parallel = F.linear(x, self.weight)
         # All-reduce across all the partitions.
         output = Reduce.apply(output_parallel)
         return output if self.bias is None else output + self.bias
@@ -243,7 +243,7 @@ class VocabParallelEmbedding(nn.Module):
         weight_list = torch.split(master_weight, self.num_embeddings_per_partition, dim=0)
         self.weight.data = weight_list[self.tp_rank].contiguous()
 
-    def forward(self, input):
+    def forward(self, x):
         """
         Performs an embedding lookup for input tokens in the parallelized embedding layer
         1. Masks tokens that fall outside the specified vocabulary range and adjusts the input
@@ -251,9 +251,9 @@ class VocabParallelEmbedding(nn.Module):
         3. Reduces the embeddings across model parallel GPUs using all-reduce for synchronization
         """
         # Build the mask for out-of-vocabulary tokens.
-        input_mask = (input < self.vocab_start_index) | (input >= self.vocab_end_index)
+        input_mask = (x < self.vocab_start_index) | (x >= self.vocab_end_index)
         # Mask the input.
-        masked_input = input.clone() - self.vocab_start_index
+        masked_input = x.clone() - self.vocab_start_index
         masked_input[input_mask] = 0
         # Get the embeddings for the valid tokens.
         output_parallel = F.embedding(

@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.distributed as dist
 from safetensors import safe_open
 import contextlib
+import requests
+import subprocess
 
 from picotron.utils import assert_no_meta_tensors, print
 import picotron.process_group_manager as pgm
@@ -50,9 +52,22 @@ def init_model_with_dematerialized_weights(include_buffers: bool = False):
 def init_model_with_materialized_weights(model, model_config, save_dir):
     #Initialize model with correct tensor shapes but random weights
     initialization_manager = InitializationManager(model, model_config)
+
+    if pgm.process_group_manager.global_rank == 0:
+        available_files = initialization_manager.check_hf_model_files_existences(model_config._name_or_path, os.environ.get("HF_TOKEN"))
+        if len(available_files) <= 0:
+            raise FileNotFoundError("Safetensors files not found. Please check the model name and authentication token.")
+
+        is_downloaded = initialization_manager.download_hf_model_files(model_config._name_or_path, os.environ.get("HF_TOKEN"), save_dir)
+        if not is_downloaded:
+            raise FileNotFoundError("Failed to download safetensors files. Please check the model name and authentication token.")
+
+    dist.barrier()
+    print(f"Rank {pgm.process_group_manager.global_rank} Safetensors files downloaded successfully")
+
     layer_names = initialization_manager.get_layer_names_in_sft_format()
 
-    print(f"Rank {pgm.process_group_manager.pp_rank} responsible for {len(layer_names)} layers")
+    print(f"Rank {pgm.process_group_manager.global_rank} responsible for {len(layer_names)} layers")
     
     if len(layer_names) == 0:
         raise Exception("Some ranks has no layers. There are too many ranks and not enough layers to distribute.")
@@ -89,11 +104,8 @@ def init_model_with_materialized_weights(model, model_config, save_dir):
 
     # Force creation of lm_head (even if it is tie_embedding)
     if pgm.process_group_manager.pp_is_last_stage or not isinstance(model, PipelineParallel):
-        vocab_size = model_config.vocab_size
-        hidden_size = model_config.hidden_size
-        model.final_proj = nn.Linear(hidden_size, vocab_size, bias=False)
-        # Initialize lm_head with zeros like other tensors
-        state_dict['final_proj.weight'] = torch.zeros(vocab_size, hidden_size)
+        model.final_proj = nn.Linear(model_config.hidden_size, model_config.vocab_size, bias=False)
+        state_dict['final_proj.weight'] = torch.zeros(model_config.vocab_size, model_config.hidden_size)
 
     # Synchronize across distributed processes and load weights
     dist.barrier()
@@ -232,6 +244,90 @@ class InitializationManager:
         for pattern, replacement in name_mapping.items():
             result = re.sub(pattern, replacement, result)
         return result
+
+    def check_hf_model_files_existences(self, model_name, hf_token):
+        files_to_check = [
+            "model.safetensors",
+            "model.safetensors.index.json"
+        ]
+        
+        # Prepare headers with authentication token
+        headers = {}
+        if hf_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
+        
+        found_files = []
+        for file in files_to_check:
+            url = f'https://huggingface.co/{model_name}/resolve/main/{file}'
+            try:
+                # Use GET request with stream=True and authentication headers
+                response = requests.get(url, stream=True, headers=headers)
+                if response.status_code == 200:
+                    found_files.append(file)
+                    print(f"✅ Found {file}")
+                    response.close()
+                elif response.status_code == 401:
+                    print(f"❌ Authentication required for {file} (Status: {response.status_code})")
+                elif response.status_code == 403:
+                    print(f"❌ Access denied for {file} (Status: {response.status_code})")
+                else:
+                    print(f"❌ Not found {file} (Status: {response.status_code})")
+            except Exception as e:
+                print(f"❌ Error checking {file}: {str(e)}")
+        
+        return found_files
+
+    def download_hf_model_files(self, model_name, hf_token, save_dir):        
+        files_to_download = ["model.safetensors", "model.safetensors.index.json"]
+        downloaded_files = []
+
+        for file in files_to_download:
+            if os.path.exists(os.path.join(save_dir, file)):
+                print(f"✅ {file} already exists")
+                downloaded_files.append(file)
+                break
+
+            model_cmd = f"huggingface-cli download {model_name} {file} --local-dir {save_dir} --token {hf_token}"
+            print(f"Downloading {file}...")
+            result = subprocess.run(model_cmd, shell=True, check=False, stdout=None, stderr=subprocess.PIPE)            
+            
+            if result.returncode == 0:
+                print(f"✅ {file} downloaded successfully")
+                downloaded_files.append(file)
+                
+                # Verify files based on their type
+                file_path = os.path.join(save_dir, file)
+                if file.endswith('.safetensors'):
+                    try:
+                        with safe_open(file_path, framework="pytorch", device="cpu") as f:
+                            keys = list(f.keys())
+                            print(f"✅ Safetensors file is valid")
+                            print(f"- Number of tensors: {len(keys)}")
+                    except Exception as e:
+                        print(f"❌ Error validating safetensors file: {str(e)}")
+                        continue
+                elif file.endswith('.json'):
+                    try:
+                        with open(file_path, 'r') as f:
+                            index_data = json.load(f)
+                            print(f"✅ Index JSON file is valid")
+                            print(f"- Number of weight shards: {len(index_data.get('weight_map', {}))}")
+                    except Exception as e:
+                        print(f"❌ Error validating index JSON file: {str(e)}")
+                        continue
+            else:
+                error_message = result.stderr.decode('utf-8', errors='replace')
+                if "404 Client Error" in error_message or "Entry Not Found" in error_message:
+                    print(f"❌ File {file} not found in repository")
+                else:
+                    print(f"❌ Download failed: {error_message.strip()}")
+
+        if len(downloaded_files) == 0:
+            print("❌ No files were downloaded")
+            return False
+
+        print(f"\nSuccessfully downloaded files: {', '.join(downloaded_files)}")
+        return True
 
 class CheckpointManager:
     def __init__(self):

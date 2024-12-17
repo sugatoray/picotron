@@ -45,6 +45,7 @@
     "environment": {
         "OMP_NUM_THREADS": "1",
         "TOKENIZERS_PARALLELISM": "false",
-        "FLASH_ATTEN": "1"
+        "FLASH_ATTEN": "1",
+        "HF_TOKEN": null
     }
 }

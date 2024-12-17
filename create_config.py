@@ -26,7 +26,8 @@ def create_single_config(
     seq_len: int,
     exp_name: str,
     use_wandb: bool = False,
-    use_fused_adam: bool = False
+    use_fused_adam: bool = False,
+    hf_token: str = None
 ):
     run_path = os.path.join(out_dir, exp_name)
 
@@ -37,9 +38,10 @@ def create_single_config(
         base_config = json.load(f)
 
     config_content = deepcopy(base_config)
+    config_content["environment"]["HF_TOKEN"] = hf_token
     config_content["training"]["seq_length"] = seq_len
     config_content["checkpoint"]["save_dir"] = run_path
-    
+
     config_content["model"]["name"] = model_name
 
     tmp_model_config = AutoConfig.from_pretrained(model_name) 
@@ -91,6 +93,7 @@ if __name__ == "__main__":
     parser.add_argument("--exp_name", type=str, help="Experiment name", default="dummy_exp")
     parser.add_argument("--use_wandb", action="store_true", help="Use wandb for logging")
     parser.add_argument("--use_fused_adam", action="store_true", help="Use fused adam")
+    parser.add_argument("--hf_token", type=str, help="HF token")
 
     args=parser.parse_args()
     
@@ -110,5 +113,6 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
         exp_name=args.exp_name,
         use_wandb=args.use_wandb,
-        use_fused_adam=args.use_fused_adam
+        use_fused_adam=args.use_fused_adam,
+        hf_token=args.hf_token
     )    

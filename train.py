@@ -29,7 +29,6 @@ from picotron.pipeline_parallel.pipeline_parallel import train_step_pipeline_1f1
 from picotron.data_parallel.data_parallel import DataParallelBucket
 from picotron.model import Llama
 import wandb
-import lovely_tensors as lt; lt.monkey_patch()
 
 def train_step(model, data_loader, device):
     acc_loss = 0.0
@@ -71,7 +70,8 @@ if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = config["environment"]["TOKENIZERS_PARALLELISM"]
     os.environ["FLASH_ATTEN"] = config["environment"]["FLASH_ATTEN"]
     os.environ["DEVICE"] = "cpu" if config["distributed"]["use_cpu"] else "cuda"
-    
+    if config["environment"]["HF_TOKEN"] is None: raise ValueError("HF_TOKEN is not set in the config file")
+    os.environ["HF_TOKEN"] = config["environment"]["HF_TOKEN"]
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() and not config["distributed"]["use_cpu"] else torch.float32
     assert (dtype == torch.bfloat16 and os.getenv("FLASH_ATTEN") == "1") or os.getenv("FLASH_ATTEN") != "1", "Kernel operations requires dtype=torch.bfloat16"
     
@@ -179,8 +179,7 @@ if __name__ == "__main__":
 
     model.to(dtype).to(device)
     
-    # TODO: why not just dp_world_size ?
-    if pgm.process_group_manager.cp_dp_world_size > 1:
+    if pgm.process_group_manager.dp_world_size > 1:
         model = DataParallelBucket(model)
     
     print(f"init model parallel time: {time.time()-start_time:.2f}s", is_print_rank=is_wandb_rank)
