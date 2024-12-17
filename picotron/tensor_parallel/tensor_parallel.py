@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import picotron.process_group_manager as pgm
-from picotron.tensor_parallel.tp_communications import Reduce, Gather, linear_with_all_reduce, linear_with_async_all_reduce
+from picotron.tensor_parallel.tp_communications import ReduceFromModelParallelRegion, GatherFromModelParallelRegion, linear_with_all_reduce, linear_with_async_all_reduce
 
 def apply_tensor_parallel(model):
 
@@ -119,7 +119,7 @@ class ColumnParallelLinear(torch.nn.Module):
         else:
             output = linear_with_all_reduce(x, self.weight, self.bias) 
         if self.gather_output:
-            output = Gather.apply(output)
+            output = GatherFromModelParallelRegion.apply(output)
         return output
     
 class RowParallelLinear(nn.Module):
@@ -185,7 +185,7 @@ class RowParallelLinear(nn.Module):
         # X_i * W_i^T + b
         output_parallel = F.linear(x, self.weight)
         # All-reduce across all the partitions.
-        output = Reduce.apply(output_parallel)
+        output = ReduceFromModelParallelRegion.apply(output_parallel)
         return output if self.bias is None else output + self.bias
 
 class VocabParallelEmbedding(nn.Module):
@@ -267,5 +267,5 @@ class VocabParallelEmbedding(nn.Module):
         )
         # Embedding of out-of-vocabulary tokens is set to 0.
         output_parallel[input_mask, :] = 0.0
-        output = Reduce.apply(output_parallel)
+        output = ReduceFromModelParallelRegion.apply(output_parallel)
         return output

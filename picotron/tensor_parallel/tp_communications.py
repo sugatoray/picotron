@@ -16,31 +16,31 @@ def split_tensor_along_last_dim(tensor, num_partitions):
     last_dim_size = tensor.size()[last_dim] // num_partitions
     return torch.split(tensor, last_dim_size, dim=last_dim)
 
-class Reduce(torch.autograd.Function):
+class ReduceFromModelParallelRegion(torch.autograd.Function):
     """All-reduce in forward pass, identity in backward pass."""
     @staticmethod
-    def forward(ctx, input):
+    def forward(ctx, x):
         if pgm.process_group_manager.tp_world_size == 1:
-            return input
-        dist.all_reduce(input, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.tp_group)
-        return input
+            return x
+        dist.all_reduce(x, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.tp_group)
+        return x
 
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output
 
-class Gather(torch.autograd.Function):
+class GatherFromModelParallelRegion(torch.autograd.Function):
     """Gather in forward pass, split in backward pass."""
     @staticmethod
-    def forward(ctx, input):
+    def forward(ctx, x):
         if pgm.process_group_manager.tp_world_size == 1:
-            return input
-        last_dim = input.dim() - 1
+            return x
+        last_dim = x.dim() - 1
         # Need contiguous tensors for collectives -> https://github.com/pytorch/pytorch/blob/main/torch/distributed/nn/functional.py#L321
-        input = input.contiguous()
-        tensor_list = [torch.empty_like(input) for _ in range(pgm.process_group_manager.tp_world_size)]
-        tensor_list[pgm.process_group_manager.tp_rank] = input
-        dist.all_gather(tensor_list, input, group=pgm.process_group_manager.tp_group)
+        x = x.contiguous()
+        tensor_list = [torch.empty_like(x) for _ in range(pgm.process_group_manager.tp_world_size)]
+        tensor_list[pgm.process_group_manager.tp_rank] = x
+        dist.all_gather(tensor_list, x, group=pgm.process_group_manager.tp_group)
         output = torch.cat(tensor_list, dim=last_dim).contiguous()
         return output
 
@@ -52,11 +52,11 @@ class Gather(torch.autograd.Function):
         chunks = split_tensor_along_last_dim(grad_output, pgm.process_group_manager.tp_world_size)
         return chunks[pgm.process_group_manager.tp_rank].contiguous()
 
-class Identity(torch.autograd.Function):
-    """Identity in forward pass, all-reduce in backward pass."""
+class CopyToModelParallelRegion(torch.autograd.Function):
+    """Copy in forward pass, all-reduce in backward pass."""
     @staticmethod
-    def forward(ctx, input):
-        return input
+    def forward(ctx, x):
+        return x
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -65,13 +65,13 @@ class Identity(torch.autograd.Function):
         dist.all_reduce(grad_output, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.tp_group)
         return grad_output
 
-def linear_with_all_reduce(input, weight, bias):
-    input_parallel = Identity.apply(input)
+def linear_with_all_reduce(x, weight, bias):
+    input_parallel = CopyToModelParallelRegion.apply(x)
     output = F.linear(input_parallel, weight, bias) # XW_i^T + b, output is Y_i
     return output
 
-def linear_with_async_all_reduce(input, weight, bias):
-    return LinearWithAsyncAllReduce.apply(input, weight, bias)
+def linear_with_async_all_reduce(x, weight, bias):
+    return LinearWithAsyncAllReduce.apply(x, weight, bias)
 
 class LinearWithAsyncAllReduce(torch.autograd.Function):
     @staticmethod
