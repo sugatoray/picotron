@@ -1,15 +1,23 @@
-import torch
+"""
+torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 test_dataloader.py
+"""
+from picotron.data import MicroBatchDataLoader
 import torch.distributed as dist
+import os
+import datetime
+from picotron.process_group_manager import setup_process_group_manager
+
+import torch
 from torch.utils.data import DataLoader, DistributedSampler
 import numpy as np
 from functools import partial
 from datasets import Features, Sequence, Value, load_dataset
 from transformers import AutoTokenizer
-from picotron.utils import print
 
 import picotron.process_group_manager as pgm
 
-class MicroBatchDataLoader(DataLoader):
+# remove context parallelism split. as a reference
+class DummyDataLoader(DataLoader):
     def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc_steps, split="train", num_samples=None, pin_memory=True):
         self.micro_batch_size = micro_batch_size
         self.seq_length = seq_length
@@ -18,20 +26,9 @@ class MicroBatchDataLoader(DataLoader):
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
         
         self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
+
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.dataset = load_dataset(dataset_name, split=split)
-
-        if pgm.process_group_manager.global_rank == 0:
-            print(f"rank: {pgm.process_group_manager.global_rank}: Creating tokenizer")
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-            objects = [self.tokenizer]
-        else:
-            print(f"rank: {pgm.process_group_manager.global_rank}: Initialized tokenizer to None")
-            objects = [None]
-
-        print(f"rank: {pgm.process_group_manager.global_rank}: Broadcasting tokenizer to all ranks", is_print_rank=pgm.process_group_manager.global_rank==0)
-        dist.broadcast_object_list(objects, src=0, device=device)
-        self.tokenizer = objects[0]
-        
         if num_samples:
             self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
         
@@ -49,7 +46,7 @@ class MicroBatchDataLoader(DataLoader):
             self.tokenized_dataset,
             batch_size=micro_batch_size,
             collate_fn=self.collate_batch, 
-            pin_memory=pin_memory, 
+            pin_memory=True, 
             num_workers=num_workers, 
             sampler=self.sampler, 
             shuffle=False
@@ -103,11 +100,9 @@ class MicroBatchDataLoader(DataLoader):
     def collate_batch(self, batch):
         batch_input_ids = torch.stack([torch.tensor(item['input_ids']) for item in batch])
         batch_size = batch_input_ids.size(0)
-        start_idx = pgm.process_group_manager.cp_rank * self.seq_length_per_gpu
-        end_idx = start_idx + self.seq_length_per_gpu
-        input_ids = batch_input_ids[:, start_idx:end_idx].contiguous()
-        target_ids = batch_input_ids[:, start_idx+1:end_idx+1].contiguous()
-        position_ids = torch.arange(start_idx, end_idx, dtype=torch.long).unsqueeze(0).expand(batch_size, -1).contiguous() 
+        input_ids = batch_input_ids[:, :self.seq_length].contiguous()
+        target_ids = batch_input_ids[:, 1:self.seq_length+1].contiguous()
+        position_ids = torch.arange(0, self.seq_length, dtype=torch.long).unsqueeze(0).expand(batch_size, -1).contiguous() 
         
         return {
             "input_ids": input_ids,
@@ -136,3 +131,83 @@ class MicroBatchDataLoader(DataLoader):
                 self._iterator = None
                 raise StopIteration
         return batch
+
+# test the tokens are split correctly in context parallelism
+# TODO: test zigzag behavior
+def test_cp_behavior(TP_SIZE, CP_SIZE, PP_SIZE, DP_SIZE, SEQ_LEN=8):
+    local_rank = int(os.environ["LOCAL_RANK"])
+    global_rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    backend = "nccl"
+    
+    assert SEQ_LEN % CP_SIZE == 0, "SEQ_LEN must be divisible by cp_size for Context Parallelism"
+    dist.init_process_group(rank=global_rank, world_size=world_size, backend=backend, init_method=f"env://", timeout=datetime.timedelta(minutes=3))
+    setup_process_group_manager(tp_size=TP_SIZE, cp_size=CP_SIZE, pp_size=PP_SIZE, dp_size=DP_SIZE)
+    
+    data_loader = MicroBatchDataLoader(
+        micro_batch_size=2,
+        seq_length=SEQ_LEN,
+        dataset_name="roneneldan/TinyStories",
+        tokenizer_name="HuggingFaceTB/SmolLM-135M",
+        grad_acc_steps=1,
+        num_workers=1,
+        num_proc=1,
+        num_samples=10,
+        pin_memory=False
+    )
+
+    ref_data_loader = DummyDataLoader(
+        micro_batch_size=2,
+        seq_length=SEQ_LEN,
+        dataset_name="roneneldan/TinyStories",
+        tokenizer_name="HuggingFaceTB/SmolLM-135M",
+        grad_acc_steps=1,
+        num_workers=1,
+        num_proc=1,
+        num_samples=10,
+        pin_memory=False
+    )
+
+    for i in range(1):
+        ref_batch = next(ref_data_loader)
+        batch = next(data_loader)
+        split_size = ref_batch["input_ids"].shape[1] // pgm.process_group_manager.cp_world_size
+        start_idx = split_size * global_rank
+        end_idx = start_idx + split_size
+        assert torch.equal(ref_batch["input_ids"][:,start_idx:end_idx], batch["input_ids"]), "input_ids are not equal"
+
+# test the infinite loop behavior
+def test_infinite_loop():
+    local_rank = 0
+    global_rank = 0
+    world_size = 1
+    backend = "nccl"
+    
+    dist.init_process_group(rank=global_rank, world_size=world_size, backend=backend, init_method=f"env://", timeout=datetime.timedelta(minutes=3))
+    setup_process_group_manager(tp_size=1, cp_size=1, pp_size=1, dp_size=1)
+    
+    data_loader = MicroBatchDataLoader(
+        micro_batch_size=2,
+        seq_length=256,
+        dataset_name="roneneldan/TinyStories",
+        tokenizer_name="HuggingFaceTB/SmolLM-135M",
+        grad_acc_steps=1,
+        num_workers=1,
+        num_proc=1,
+        num_samples=2,
+    ) 
+
+    s = set()
+    for i in range(10):
+        batch = next(data_loader)
+        # Convert the nested list to a tuple of tuples
+        batch_tuple = tuple(tuple(x) for x in batch["input_ids"].tolist())
+        if batch_tuple in s:
+            assert True
+        s.add(batch_tuple)
+    assert False
+
+
+if __name__ == "__main__":
+    # test_infinite_loop()
+    test_cp_behavior(TP_SIZE=1, CP_SIZE=2, PP_SIZE=1, DP_SIZE=1, SEQ_LEN=8)

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import picotron.process_group_manager as pgm
-from picotron.tensor_parallel.tp_communications import Reduce, Gather, Copy, split_tensor_along_last_dim
+from picotron.tensor_parallel.tp_communications import Reduce, Gather, linear_with_all_reduce, linear_with_async_all_reduce
 
 def apply_tensor_parallel(model):
 
@@ -51,10 +51,26 @@ def apply_tensor_parallel(model):
     
     return model
 
-class ColumnParallelLinear(nn.Module):
+class ColumnParallelLinear(torch.nn.Module):
+    """Column Parallel Linear layer
+    Y = XW + b, where weight matrix W is parallelized along its second dimension. W = [W_1, ..., W_p]
+    This module returns the results of Y_i = XW_i + b_i in the forward method, Y_i is parallelized in the second dimension.
+    Arguments:
+        in_features: first dimension of weight matrix W.
+        out_features: second dimension of weight matrix W.
+        bias: If true, add bias
+        init_method: method to initialize weights
+        gather_output: If true, gather the output from all the partitions. This is used for the last linear layer
+    """
 
-    def __init__(self, in_features: int, out_features: int, bias: bool, gather_output: bool = False):
-        
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        gather_output: bool = False,
+        async_all_reduce: bool = True,
+    ) -> None:
         super(ColumnParallelLinear, self).__init__()
 
         self.tp_world_size = pgm.process_group_manager.tp_world_size
@@ -65,7 +81,8 @@ class ColumnParallelLinear(nn.Module):
         assert out_features % self.tp_world_size == 0, "Hidden dimension must be divisible by the tensor parallel world size"
         self.output_size_per_partition = out_features // self.tp_world_size
         self.gather_output = gather_output
-     
+        self.async_all_reduce = async_all_reduce
+        # Allocate space for the weight and bias
         # Note: torch.nn.functional.linear performs XW^T + b so we exchange the order of dimensions
         self.weight = nn.Parameter(torch.Tensor(self.output_size_per_partition, self.in_features)) # W_i
         if bias:
@@ -95,17 +112,34 @@ class ColumnParallelLinear(nn.Module):
         # Split the model into size of self.output_size_per_partition
         weight_list = torch.split(master_weight, self.output_size_per_partition, dim=0)
         self.weight.data = weight_list[self.tp_rank].contiguous()
-
-    def forward(self, input):
-        input_parallel = Copy.apply(input)
-        # XW_i^T + b, output is Y_i
-        output = F.linear(input_parallel, self.weight, self.bias)
+    
+    def forward(self, input: torch.Tensor) -> torch.Tensor:  
+        if self.async_all_reduce:
+            output = linear_with_async_all_reduce(input, self.weight, self.bias) 
+        else:
+            output = linear_with_all_reduce(input, self.weight, self.bias) 
         if self.gather_output:
             output = Gather.apply(output)
         return output
     
 class RowParallelLinear(nn.Module):
-    
+    """Linear layer with row parallelism.
+    Y = XW + b. W is parallelized along its first dimension and X along its second dimension as:
+               -   -
+              | W_1 |
+              | .   |
+          W = | .   |        X = [X_1, ..., X_p]
+              | .   |
+              | W_p |
+               -   -
+    We assume that X is already parallelized. This is the case after ColumnParallelLinear.
+    This module returns the results of Y = sum(X_i * W_i + b_i) in the forward method.
+    Arguments:
+        in_features: first dimension of matrix W.
+        out_features: second dimension of matrix W.
+        bias: If true, add bias
+        init_method: method to initialize weights.
+    """
     def __init__(self, in_features: int, out_features: int, bias: bool):
         super(RowParallelLinear, self).__init__()
 

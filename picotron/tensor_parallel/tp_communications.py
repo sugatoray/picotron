@@ -1,6 +1,13 @@
 import torch.distributed as dist
 import torch
 import picotron.process_group_manager as pgm
+import torch.nn.functional as F
+
+from typing import Tuple
+
+def merge_first_two_dims(grad_output: torch.Tensor, input_: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Merge the first two dimensions of tensors."""
+    return grad_output.contiguous().view(-1, *grad_output.shape[2:]), input_.contiguous().view(-1, *input_.shape[2:])
 
 def split_tensor_along_last_dim(tensor, num_partitions):
     """Split a tensor along its last dimension into num_partitions chunks."""
@@ -45,7 +52,7 @@ class Gather(torch.autograd.Function):
         chunks = split_tensor_along_last_dim(grad_output, pgm.process_group_manager.tp_world_size)
         return chunks[pgm.process_group_manager.tp_rank].contiguous()
 
-class Copy(torch.autograd.Function):
+class Identity(torch.autograd.Function):
     """Identity in forward pass, all-reduce in backward pass."""
     @staticmethod
     def forward(ctx, input):
@@ -57,3 +64,40 @@ class Copy(torch.autograd.Function):
           return grad_output
         dist.all_reduce(grad_output, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.tp_group)
         return grad_output
+
+def linear_with_all_reduce(input, weight, bias):
+    input_parallel = Identity.apply(input)
+    output = F.linear(input_parallel, weight, bias) # XW_i^T + b, output is Y_i
+    return output
+
+def linear_with_async_all_reduce(input, weight, bias):
+    return LinearWithAsyncAllReduce.apply(input, weight, bias)
+
+class LinearWithAsyncAllReduce(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input_, weight, bias):
+        ctx.save_for_backward(input_, weight)
+        ctx.use_bias = bias is not None
+        output = input_ @ weight.t() + bias if bias is not None else input_ @ weight.t()
+        return output
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        The key difference with "linear_with_all_reduce" is that the all reduce of input_ gradeint is before 
+        the calculation of the gradient of weights and bias, instead of after. So we can overlap the computation and communication
+        This is only applicable to Column Parallel Linear
+
+        Before: grad_output -> grad_input, grad_weight, grad_bias  -> grad_input all reduce
+        Now:    grad_output -> grad_input -> grad_input all reduce -> grad_weight, grad_bias
+        """
+        input_, weight = ctx.saved_tensors
+        grad_input = grad_output @ weight # (b, s, out_size) @ (out_size, input_size) = (b, s, input_size)
+        # all-reduce input gradient. 
+        input_gradient_all_reduce_handle = dist.all_reduce(grad_input, group=pgm.process_group_manager.tp_group, async_op=True)
+        # merge first two dims to allow matrix multiplication
+        grad_output, input_ = merge_first_two_dims(grad_output, input_)     # grad_output, input_: (b, s, out_size), (b, s, input_size) -> (b*s, out_size), (b*s, input_size)
+        grad_weight = grad_output.t() @ input_                              # (out_size, b*s) @ (b*s, input_size) -> (out_size, input_size)
+        grad_bias = grad_output.sum(0) if ctx.use_bias else None
+        input_gradient_all_reduce_handle.wait()
+        return grad_input, grad_weight, grad_bias
