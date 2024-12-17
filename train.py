@@ -143,7 +143,7 @@ if __name__ == "__main__":
         )
 
     if pgm.process_group_manager.global_rank == 0:
-        print(f"rank: {pgm.process_group_manager.global_rank}: Creating model config")
+        print(f"rank {pgm.process_group_manager.global_rank}: Creating model config")
         model_config = AutoConfig.from_pretrained(config["model"]["name"])
         model_config.num_hidden_layers = config["model"]["num_hidden_layers"]
         model_config.num_attention_heads = config["model"]["num_attention_heads"]
@@ -151,11 +151,11 @@ if __name__ == "__main__":
         model_config.max_position_embeddings = config["training"]["seq_length"]
         objects = [model_config]
     else:
-        print(f"rank: {pgm.process_group_manager.global_rank}: Initialized model_config as None")
         objects = [None]
 
     dist.broadcast_object_list(objects, src=0, device=device)
     model_config = objects[0]
+    print(f"rank {pgm.process_group_manager.global_rank}: Broadcasting model_config to all ranks", is_print_rank=pgm.process_group_manager.global_rank==0)
 
     dist.barrier()
 
@@ -170,7 +170,7 @@ if __name__ == "__main__":
         if pgm.process_group_manager.pp_world_size > 1:
             model = PipelineParallel(model, model_config)
 
-    model = init_model_with_materialized_weights(model, model_config, save_dir=config["checkpoint"]["save_dir"])
+    model = init_model_with_materialized_weights(model, model_config, save_dir=f"./hf_model_safetensors/{model_config._name_or_path}")
 
     #TODO: load existing checkpoint here to continue pre-training
 

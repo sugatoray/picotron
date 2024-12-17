@@ -21,14 +21,13 @@ class MicroBatchDataLoader(DataLoader):
         self.dataset = load_dataset(dataset_name, split=split)
 
         if pgm.process_group_manager.global_rank == 0:
-            print(f"rank: {pgm.process_group_manager.global_rank}: Creating tokenizer")
+            print(f"rank {pgm.process_group_manager.global_rank}: Creating tokenizer")
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
             objects = [self.tokenizer]
         else:
-            print(f"rank: {pgm.process_group_manager.global_rank}: Initialized tokenizer to None")
             objects = [None]
 
-        print(f"rank: {pgm.process_group_manager.global_rank}: Broadcasting tokenizer to all ranks", is_print_rank=pgm.process_group_manager.global_rank==0)
+        print(f"rank {pgm.process_group_manager.global_rank}: Broadcasting tokenizer to all ranks", is_print_rank=pgm.process_group_manager.global_rank==0)
         dist.broadcast_object_list(objects, src=0, device=device)
         self.tokenizer = objects[0]
         

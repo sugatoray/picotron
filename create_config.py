@@ -9,6 +9,101 @@ import shutil
 import argparse
 import json
 from typing import Optional
+import subprocess
+import requests
+from safetensors import safe_open
+
+def check_hf_model_files_existences(model_name, hf_token):
+    files_to_check = [
+        "model.safetensors",
+        "model.safetensors.index.json"
+    ]
+    
+    # Prepare headers with authentication token
+    headers = {}
+    if hf_token: headers["Authorization"] = f"Bearer {hf_token}"
+    
+    index = 0
+    found_files = []
+    for file in files_to_check:
+        url = f'https://huggingface.co/{model_name}/resolve/main/{file}'
+        try:
+            # Use GET request with stream=True and authentication headers
+            response = requests.get(url, stream=True, headers=headers)
+            if response.status_code == 200:
+                found_files.append(file)
+                print(f"✅ Found {file}")
+                response.close()
+            elif response.status_code == 401:
+                print(f"❌ Authentication required for {file} (Status: {response.status_code})")
+            elif response.status_code == 403:
+                print(f"❌ Access denied for {file} (Status: {response.status_code})")
+            else:
+                print(f"❌ Not found {file} (Status: {response.status_code})")
+        except Exception as e:
+            print(f"❌ Error checking {file}: {str(e)}")
+    
+    return found_files
+
+def download_hf_model_files(files_to_download, model_name, hf_token, save_dir):        
+    downloaded_files = []
+
+    save_dir_path = f"{save_dir}/{model_name}"
+
+    for file in files_to_download:
+        if os.path.exists(os.path.join(save_dir_path, file)):
+            print(f"✅ {file} already exists")
+            downloaded_files.append(file)
+            
+            # If it's index.json, read it to get shards
+            if file.endswith('.json'):
+                with open(os.path.join(save_dir_path, file), 'r') as f:
+                    index_data = json.load(f)
+                    shards = set(index_data['weight_map'].values())
+                    print(f"Found {len(shards)} shards in index")
+                    files_to_download.extend(shards)
+            continue
+
+        model_cmd = f"huggingface-cli download {model_name} {file} --local-dir {save_dir_path} --token {hf_token}"
+        print(f"Downloading {file}...")
+        result = subprocess.run(model_cmd, shell=True, check=False)            
+        
+        if result.returncode == 0:
+            print(f"✅ {file} downloaded successfully")
+            downloaded_files.append(file)
+            
+            # Verify files based on their type
+            file_path = os.path.join(save_dir_path, file)
+            if file.endswith('.safetensors'):
+                try:
+                    with safe_open(file_path, framework="pytorch", device="cpu") as f:
+                        keys = list(f.keys())
+                        print(f"✅ Safetensors file is valid")
+                        print(f"- Number of tensors: {len(keys)}")
+                except Exception as e:
+                    print(f"❌ Error validating safetensors file: {str(e)}")
+                    continue
+            elif file.endswith('.json'):
+                try:
+                    with open(file_path, 'r') as f:
+                        index_data = json.load(f)
+                        shards = set(index_data['weight_map'].values())
+                        print(f"✅ Index JSON file is valid")
+                        print(f"- Number of weight shards: {len(shards)}")
+                        # Add shards to files_to_download
+                        files_to_download.extend(shards)
+                except Exception as e:
+                    print(f"❌ Error validating index JSON file: {str(e)}")
+                    continue
+        else:
+            error_message = result.stderr.decode('utf-8', errors='replace')
+            if "404 Client Error" in error_message or "Entry Not Found" in error_message:
+                print(f"❌ File {file} not found in repository")
+            else:
+                print(f"❌ Download failed: {error_message.strip()}")
+
+    print(f"\nSuccessfully downloaded files: {', '.join(downloaded_files)}")
+    return True
 
 def create_single_config(
     out_dir: str,
@@ -82,7 +177,7 @@ if __name__ == "__main__":
     parser.add_argument("--cp", type=int, help="number of context parallelism", default=1)
     parser.add_argument("--dp", type=int, help="number of data parallelism", default=1)
     parser.add_argument("--pp", type=int, help="number of pipeline parallelism", default=1)
-    parser.add_argument("--pp_engine", type=str, help="pipeline parallel engine", default="afab")
+    parser.add_argument("--pp_engine", type=str, help="pipeline parallel engine", default="1f1b")
     parser.add_argument("--model_name", type=str, help="Model name to create configs for", default="HuggingFaceTB/SmolLM-360M-Instruct")
     parser.add_argument("--num_hidden_layers", type=int, help="Number of hidden layers", default=None)
     parser.add_argument("--num_attention_heads", type=int, help="Number of attention heads", default=None)
@@ -116,3 +211,18 @@ if __name__ == "__main__":
         use_fused_adam=args.use_fused_adam,
         hf_token=args.hf_token
     )    
+
+    print("Configs created successfully! ✅")
+
+    # Download HF model safetensors at the "hf_model_safetensors" directory
+    os.makedirs("hf_model_safetensors", exist_ok=True)
+
+    files_to_download = check_hf_model_files_existences(args.model_name, args.hf_token)
+    if len(files_to_download) <= 0:
+        raise FileNotFoundError("Safetensors files not found. Please check the model name and authentication token.")
+
+    is_downloaded = download_hf_model_files(files_to_download, args.model_name, args.hf_token, save_dir="hf_model_safetensors")
+    if not is_downloaded:
+        raise FileNotFoundError("Failed to download safetensors files. Please check the model name and authentication token.")
+
+    print("SafeTensors files downloaded successfully! ✅")
