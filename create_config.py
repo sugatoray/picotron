@@ -18,7 +18,6 @@ def create_single_config(
     pp: int,
     pp_engine: str,
     model_name: str,
-    hf_hub_safetensors_path: Optional[str],
     num_hidden_layers: Optional[int],
     num_attention_heads: Optional[int],
     num_key_value_heads: Optional[int],
@@ -42,8 +41,7 @@ def create_single_config(
     config_content["checkpoint"]["save_dir"] = run_path
     
     config_content["model"]["name"] = model_name
-    config_content["checkpoint"]["hf_hub_safetensors_path"] = hf_hub_safetensors_path
-    
+
     tmp_model_config = AutoConfig.from_pretrained(model_name) 
     config_content["model"]["num_hidden_layers"] = tmp_model_config.num_hidden_layers if num_hidden_layers is None else num_hidden_layers
     config_content["model"]["num_attention_heads"] = tmp_model_config.num_attention_heads if num_attention_heads is None else num_attention_heads
@@ -84,7 +82,6 @@ if __name__ == "__main__":
     parser.add_argument("--pp", type=int, help="number of pipeline parallelism", default=1)
     parser.add_argument("--pp_engine", type=str, help="pipeline parallel engine", default="afab")
     parser.add_argument("--model_name", type=str, help="Model name to create configs for", default="HuggingFaceTB/SmolLM-360M-Instruct")
-    parser.add_argument("--hf_hub_safetensors_path", type=str, help="HuggingFace model checkpoint path", default=None)
     parser.add_argument("--num_hidden_layers", type=int, help="Number of hidden layers", default=None)
     parser.add_argument("--num_attention_heads", type=int, help="Number of attention heads", default=None)
     parser.add_argument("--num_key_value_heads", type=int, help="Number of key value heads", default=None)
@@ -105,7 +102,6 @@ if __name__ == "__main__":
         pp=args.pp,
         pp_engine=args.pp_engine,
         model_name=args.model_name,
-        hf_hub_safetensors_path=args.hf_hub_safetensors_path,
         num_hidden_layers=args.num_hidden_layers,
         num_attention_heads=args.num_attention_heads,
         num_key_value_heads=args.num_key_value_heads,

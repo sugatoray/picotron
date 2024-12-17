@@ -47,11 +47,7 @@ def init_model_with_dematerialized_weights(include_buffers: bool = False):
         if include_buffers:
             nn.Module.register_buffer = old_register_buffer
 
-def init_model_with_materialized_weights(model, model_config, hf_hub_safetensors_path):
-
-    if hf_hub_safetensors_path is None:
-        raise Exception("Path to safetensors files is required to initialize model with materialized weights.")
-
+def init_model_with_materialized_weights(model, model_config, save_dir):
     #Initialize model with correct tensor shapes but random weights
     initialization_manager = InitializationManager(model, model_config)
     layer_names = initialization_manager.get_layer_names_in_sft_format()
@@ -69,20 +65,20 @@ def init_model_with_materialized_weights(model, model_config, hf_hub_safetensors
         tensor = initialization_manager.adjust_tensor_size(tensor, hf_name)
         return hf_name, torch.zeros_like(tensor)
 
-    index_path = os.path.join(hf_hub_safetensors_path, "model.safetensors.index.json")
+    index_path = os.path.join(save_dir, "model.safetensors.index.json")
 
     if os.path.exists(index_path): # Handle sharded checkpoint
         with open(index_path, 'r') as f:
             index = json.load(f)
         
         for sft_name in layer_names:
-            shard_path = os.path.join(hf_hub_safetensors_path, index['weight_map'][sft_name])
+            shard_path = os.path.join(save_dir, index['weight_map'][sft_name])
             with safe_open(shard_path, framework="pytorch", device="cpu") as f:
                 hf_name, tensor = _process_tensor(sft_name, f)
                 state_dict[hf_name] = tensor
 
     else: # Handle single file checkpoint
-        safetensors_path = os.path.join(hf_hub_safetensors_path, "model.safetensors")
+        safetensors_path = os.path.join(save_dir, "model.safetensors")
         with safe_open(safetensors_path, framework="pytorch", device="cpu") as f:
             if len(f.keys()) > len(layer_names):
                 print(f"Warning: Checkpoint has {len(f.keys())} layers but model only has {len(layer_names)} layers.")
@@ -90,6 +86,14 @@ def init_model_with_materialized_weights(model, model_config, hf_hub_safetensors
             for sft_name in layer_names:
                 hf_name, tensor = _process_tensor(sft_name, f)
                 state_dict[hf_name] = tensor
+
+    # Force creation of lm_head (even if it is tie_embedding)
+    if pgm.process_group_manager.pp_is_last_stage or not isinstance(model, PipelineParallel):
+        vocab_size = model_config.vocab_size
+        hidden_size = model_config.hidden_size
+        model.final_proj = nn.Linear(hidden_size, vocab_size, bias=False)
+        # Initialize lm_head with zeros like other tensors
+        state_dict['final_proj.weight'] = torch.zeros(vocab_size, hidden_size)
 
     # Synchronize across distributed processes and load weights
     dist.barrier()
@@ -135,14 +139,15 @@ class InitializationManager:
             layer_names.extend(f"{layer}.{component}.weight" for component in decoder_components)
         
         # Add special layers based on pipeline stage or non-PP case
+        # NOTE: Safetensors may have tied embeddings, but Picotron does not support it. We always create a new lm_head.
         if isinstance(self.model, PipelineParallel):
             if pgm.process_group_manager.pp_is_first_stage:
                 layer_names.insert(0, "model.embed_tokens.weight")
             elif pgm.process_group_manager.pp_is_last_stage:
-                layer_names.extend(["model.norm.weight", "lm_head.weight"])
+                layer_names.extend(["model.norm.weight"])
         else:
             layer_names.insert(0, "model.embed_tokens.weight")
-            layer_names.extend(["model.norm.weight", "lm_head.weight"])
+            layer_names.extend(["model.norm.weight"])
 
         return layer_names
 

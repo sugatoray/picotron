@@ -170,7 +170,7 @@ if __name__ == "__main__":
         if pgm.process_group_manager.pp_world_size > 1:
             model = PipelineParallel(model, model_config)
 
-    model = init_model_with_materialized_weights(model, model_config, hf_hub_safetensors_path=config["checkpoint"]["hf_hub_safetensors_path"])
+    model = init_model_with_materialized_weights(model, model_config, save_dir=config["checkpoint"]["save_dir"])
 
     #TODO: load existing checkpoint here to continue pre-training
 
