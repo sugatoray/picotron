@@ -10,7 +10,7 @@ from picotron.utils import print
 import picotron.process_group_manager as pgm
 
 class MicroBatchDataLoader(DataLoader):
-    def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc_steps, device, split="train", num_samples=None, pin_memory=True):
+    def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc_steps, device, subset_name=None, split="train", num_samples=None, pin_memory=True):
         self.micro_batch_size = micro_batch_size
         self.seq_length = seq_length
         self.grad_acc_steps = grad_acc_steps

@@ -29,6 +29,7 @@
     },
     "dataset": {
         "name": "roneneldan/TinyStories",
+        "subset_name": null,
         "num_workers": 0,
         "num_proc": 1
     },

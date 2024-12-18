@@ -111,7 +111,8 @@ if __name__ == "__main__":
         device=device,
         num_workers=config["dataset"]["num_workers"],
         num_proc=config["dataset"]["num_proc"],
-        num_samples=config["training"]["num_samples"]
+        num_samples=config["training"]["num_samples"],
+        subset_name=config["dataset"]["subset_name"],
     )
 
     dist.barrier()
