@@ -68,6 +68,7 @@ def download_hf_model_files(files_to_download, model_name, hf_token, save_dir):
         print(f"Downloading {file}...")
         env = os.environ.copy()
         env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
         result = subprocess.run(model_cmd, shell=True, check=False, env=env)            
         
         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
