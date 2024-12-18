@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 import picotron.process_group_manager as pgm
 
 class MicroBatchDataLoader(DataLoader):
-    def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc_steps, split="train", num_samples=None, pin_memory=True):
+    def __init__(self,  micro_batch_size, seq_length, dataset_name, tokenizer_name, num_workers, num_proc, grad_acc_steps, subset_name=None, split="train", num_samples=None, pin_memory=True):
         self.micro_batch_size = micro_batch_size
         self.seq_length = seq_length
         self.grad_acc_steps = grad_acc_steps
@@ -18,7 +18,9 @@ class MicroBatchDataLoader(DataLoader):
         self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        self.dataset = load_dataset(dataset_name, split=split)
+        
+        self.dataset = load_dataset(dataset_name, name=subset_name, split=split)
+
         if num_samples:
             self.dataset = self.dataset.select(range(min(num_samples, len(self.dataset))))
         

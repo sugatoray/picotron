@@ -84,13 +84,15 @@ if __name__ == "__main__":
     SEQ_LEN = config["training"]["seq_length"]
     MICRO_BATCH_SIZE = config["training"]["micro_batch_size"]
     LEARNING_RATE = config["training"]["learning_rate"]
-    NUM_SAMPLES = config["training"]["num_samples"]
     MAX_TOKENS = config["training"]["max_tokens"]
     SEED = config["training"]["seed"]
     TOTAL_TRAIN_STEPS = config["training"]["total_train_steps"]
     GRAD_ACC_STEPS = config["training"]["gradient_accumulation_steps"]
     MODEL_NAME = config["model"]["name"]
     DATASET_NAME = config["dataset"]["name"]
+    SUBSET_NAME = config["dataset"].get("subset_name", None)
+    SPLIT = config["dataset"].get("split", "train")
+    NUM_SAMPLES = config["dataset"].get("num_samples", None)
     NUM_WORKERS = config["dataset"]["num_workers"]
     NUM_PROC = config["dataset"]["num_proc"]
     USE_WANDB = config["logging"]["use_wandb"]
@@ -133,7 +135,9 @@ if __name__ == "__main__":
         grad_acc_steps=GRAD_ACC_STEPS,
         num_workers=NUM_WORKERS,
         num_proc=NUM_PROC,
-        num_samples=NUM_SAMPLES
+        num_samples=NUM_SAMPLES,
+        subset_name=SUBSET_NAME,
+        split=SPLIT
     )
 
     dist.barrier()
