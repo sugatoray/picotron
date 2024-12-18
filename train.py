@@ -159,6 +159,8 @@ if __name__ == "__main__":
 
     dist.barrier()
 
+    print(f"rank {pgm.process_group_manager.global_rank}: Initializing model meta device", is_print_rank=is_wandb_rank)
+
     start_time = time.time()
 
     with init_model_with_dematerialized_weights():
@@ -209,7 +211,8 @@ if __name__ == "__main__":
     def _all_reduce_loss_across_dp_cp_ranks(loss, device):
         reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
         if pgm.process_group_manager.pp_is_last_stage:
-            dist.all_reduce(reduced_loss, op=dist.ReduceOp.AVG, group=pgm.process_group_manager.cp_dp_group)
+            dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.cp_dp_group)
+            reduced_loss /= pgm.process_group_manager.cp_dp_world_size
         return reduced_loss.item()
     
     while config["training"]["max_tokens"] is None or trained_tokens < config["training"]["max_tokens"]:

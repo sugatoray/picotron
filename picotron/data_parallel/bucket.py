@@ -68,6 +68,7 @@ class BucketManager:
             grad_type (torch.dtype, optional): Data type of gradients, defaults to torch.float32.
         """
         self.params = list(params) # Convert parameter generator to a list.
+        self.device = torch.device("cuda") if self.params[0].is_cuda else torch.device("cpu")
         self.buckets = [] # List of buckets.
         self.process_group = process_group
         self.process_group_size = dist.get_world_size(group=self.process_group)
@@ -116,7 +117,7 @@ class BucketManager:
         
         # Create tensors for storing gradients and initialize Bucket objects.
         for i in range(len(bucket_sizes)):
-            self.grad_data_list.append(torch.zeros(bucket_sizes[i], dtype=self.grad_type, device='cuda'))
+            self.grad_data_list.append(torch.zeros(bucket_sizes[i], dtype=self.grad_type, device=self.device))
             self.buckets.append(Bucket(buckets_to_params[i], self.grad_data_list[i], self.process_group))
         
         # Create gradient views for each parameter.

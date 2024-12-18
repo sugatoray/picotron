@@ -30,7 +30,7 @@
     "dataset": {
         "name": "roneneldan/TinyStories",
         "num_workers": 0,
-        "num_proc": 4
+        "num_proc": 1
     },
     "checkpoint": {
         "save_dir": "ckpt",

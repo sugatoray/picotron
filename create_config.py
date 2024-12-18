@@ -126,6 +126,7 @@ def create_single_config(
     seq_len: int,
     exp_name: str,
     use_wandb: bool = False,
+    use_cpu: bool = False,
     use_fused_adam: bool = False,
     hf_token: str = None
 ):
@@ -156,6 +157,10 @@ def create_single_config(
     config_content['distributed']['dp_size'] = dp
     config_content['distributed']['pp_size'] = pp
     config_content['distributed']['pp_engine'] = pp_engine
+    config_content['distributed']['use_cpu'] = use_cpu
+    if use_cpu:
+        config_content["environment"]["FLASH_ATTEN"] = "0"
+        config_content["distributed"]["backend"] = "gloo"
 
     config_content['logging']['use_wandb'] = use_wandb
     config_content['logging']['run_name'] = exp_name
@@ -192,6 +197,7 @@ if __name__ == "__main__":
     parser.add_argument("--seq_len", type=int, help="Sequence length", default=1024)
     parser.add_argument("--exp_name", type=str, help="Experiment name", default="dummy_exp")
     parser.add_argument("--use_wandb", action="store_true", help="Use wandb for logging")
+    parser.add_argument("--use_cpu", action="store_true", help="Use CPU for training")
     parser.add_argument("--use_fused_adam", action="store_true", help="Use fused adam")
     parser.add_argument("--hf_token", type=str, help="HF token")
 
@@ -213,6 +219,7 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
         exp_name=args.exp_name,
         use_wandb=args.use_wandb,
+        use_cpu=args.use_cpu,
         use_fused_adam=args.use_fused_adam,
         hf_token=args.hf_token
     )    
