@@ -8,6 +8,11 @@ from picotron.data_parallel.bucket import BucketManager
 import picotron.process_group_manager as pgm
 
 class DataParallelNaive(nn.Module):
+    """
+    Naive Data Parallelism. Not used in practice. But it is a good starting point to understand how data parallelism works.
+    It implements a simple all-reduce operation to synchronize gradients across multiple processes.
+    And `no_sync` context manager to disable gradient synchronization.
+    """
     def __init__(self, module):
         """
         Initializes the DataParallel wrapper for a given module.
@@ -55,6 +60,9 @@ class DataParallelNaive(nn.Module):
         self.require_backward_grad_sync = True
 
 class DataParallelBucket(nn.Module):
+    """
+    Data Parallelism with gradient grouped into buckets to reduce the communication overhead.
+    """
     def __init__(self, module, bucket_cap_mb=25, grad_type = torch.float32):
         """
         Initialize the DataParallelBucket module.
