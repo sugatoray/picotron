@@ -52,7 +52,6 @@ def get_num_params(model):
     For DP: Parameters are replicated, so only count once
     
     Note: 
-    LayerNorm: Split across TP ranks for sequence parallelism
     FSDP: Parameters are sharded across data parallel ranks
     """
     tp_world_size = pgm.process_group_manager.tp_world_size
@@ -87,3 +86,10 @@ def assert_no_meta_tensors(model):
             meta_tensors.append(f"Buffer '{name}' with shape {buffer.shape}")
     
     assert len(meta_tensors) == 0, f"Found {len(meta_tensors)} meta tensors:\n" + "\n".join(meta_tensors)
+
+def average_loss_across_dp_cp_ranks(loss, device):
+    reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
+    if pgm.process_group_manager.pp_is_last_stage:
+        dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.cp_dp_group)
+        reduced_loss /= pgm.process_group_manager.cp_dp_world_size
+    return reduced_loss.item()

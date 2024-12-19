@@ -1,10 +1,6 @@
 """Training script for LLaMA model.
-CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun --nproc_per_node 1 --master_addr localhost --master_port 25500 train.py --config tmp/dummy/360M_131K.json
-CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun --nproc_per_node 2 --master_addr localhost --master_port 25500 train.py --config tmp/dummy/360M_131K.json
 CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --config tmp/dummy/llama2_7b_benchmark.json
-CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun --nproc_per_node 8 --master_addr localhost --master_port 25500 train.py --config tmp/dummy/360M_131K.json
-CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=2 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --config tmp/dummy/360M_131K.json
-#VERBOSE=0 torchrun --nproc_per_node 4 --master_addr localhost --master_port 25500 train.py --pp_size 2 --dp_size 2
+CUDA_DEVICE_MAX_CONNECTIONS=1 debugpy-run -p 5678 -m torch.distributed.run -- --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29400 train.py --config tmp/dummy/llama2_7b_benchmark.json
 """
 import os
 import inspect
@@ -20,7 +16,7 @@ from transformers import AutoConfig
 from picotron.context_parallel.context_parallel import apply_context_parallel
 from picotron.tensor_parallel.tensor_parallel import apply_tensor_parallel
 import picotron.process_group_manager as pgm
-from picotron.utils import set_all_seed, print, to_readable_format, get_mfu, get_num_params
+from picotron.utils import average_loss_across_dp_cp_ranks, set_all_seed, print, to_readable_format, get_mfu, get_num_params
 from picotron.checkpoint import CheckpointManager
 from picotron.checkpoint import init_model_with_dematerialized_weights, init_model_with_materialized_weights
 from picotron.data import MicroBatchDataLoader
@@ -111,8 +107,9 @@ if __name__ == "__main__":
         device=device,
         num_workers=config["dataset"]["num_workers"],
         num_proc=config["dataset"]["num_proc"],
-        num_samples=config["training"]["num_samples"],
-        subset_name=config["dataset"]["subset_name"],
+        num_samples=config["training"].get("num_samples", None),
+        subset_name=config["dataset"].get("subset_name", None),
+        split=config["dataset"].get("split", "train")
     )
 
     dist.barrier()
@@ -208,13 +205,6 @@ if __name__ == "__main__":
         step, trained_tokens = checkpoint_manager.load_checkpoint(model, optimizer, config["checkpoint"]["load_path"])
     
     dist.barrier()
-        
-    def _all_reduce_loss_across_dp_cp_ranks(loss, device):
-        reduced_loss = torch.tensor([loss if loss is not None else 0.0], dtype=torch.float32, device=device)
-        if pgm.process_group_manager.pp_is_last_stage:
-            dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.cp_dp_group)
-            reduced_loss /= pgm.process_group_manager.cp_dp_world_size
-        return reduced_loss.item()
     
     while config["training"]["max_tokens"] is None or trained_tokens < config["training"]["max_tokens"]:
         step_start_time = time.time()
@@ -230,7 +220,7 @@ if __name__ == "__main__":
         else:
             loss = train_step(model, data_loader, device)
             
-        loss = _all_reduce_loss_across_dp_cp_ranks(loss, device)
+        loss = average_loss_across_dp_cp_ranks(loss, device)
         
         optimizer.step()
         trained_tokens += tokens_per_step

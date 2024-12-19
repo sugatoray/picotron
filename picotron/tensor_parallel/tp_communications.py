@@ -16,8 +16,27 @@ def split_tensor_along_last_dim(tensor, num_partitions):
     last_dim_size = tensor.size()[last_dim] // num_partitions
     return torch.split(tensor, last_dim_size, dim=last_dim)
 
+class CopyToModelParallelRegion(torch.autograd.Function):
+    """
+    Copy in forward pass, all-reduce in backward pass.
+    This is the `f` function in the paper: https://arxiv.org/abs/1909.08053
+    """
+    @staticmethod
+    def forward(ctx, x):
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if pgm.process_group_manager.tp_world_size == 1:
+          return grad_output
+        dist.all_reduce(grad_output, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.tp_group)
+        return grad_output
+
 class ReduceFromModelParallelRegion(torch.autograd.Function):
-    """All-reduce in forward pass, identity in backward pass."""
+    """
+    All-reduce in forward pass, identity in backward pass.
+    This is the `g` function in the paper: https://arxiv.org/abs/1909.08053
+    """
     @staticmethod
     def forward(ctx, x):
         if pgm.process_group_manager.tp_world_size == 1:
@@ -52,27 +71,6 @@ class GatherFromModelParallelRegion(torch.autograd.Function):
         chunks = split_tensor_along_last_dim(grad_output, pgm.process_group_manager.tp_world_size)
         return chunks[pgm.process_group_manager.tp_rank].contiguous()
 
-class CopyToModelParallelRegion(torch.autograd.Function):
-    """Copy in forward pass, all-reduce in backward pass."""
-    @staticmethod
-    def forward(ctx, x):
-        return x
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        if pgm.process_group_manager.tp_world_size == 1:
-          return grad_output
-        dist.all_reduce(grad_output, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.tp_group)
-        return grad_output
-
-def linear_with_all_reduce(x, weight, bias):
-    input_parallel = CopyToModelParallelRegion.apply(x)
-    output = F.linear(input_parallel, weight, bias) # XW_i^T + b, output is Y_i
-    return output
-
-def linear_with_async_all_reduce(x, weight, bias):
-    return LinearWithAsyncAllReduce.apply(x, weight, bias)
-
 class LinearWithAsyncAllReduce(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_, weight, bias):
@@ -101,3 +99,11 @@ class LinearWithAsyncAllReduce(torch.autograd.Function):
         grad_bias = grad_output.sum(0) if ctx.use_bias else None
         input_gradient_all_reduce_handle.wait()
         return grad_input, grad_weight, grad_bias
+
+def linear_with_all_reduce(x, weight, bias):
+    input_parallel = CopyToModelParallelRegion.apply(x)
+    output = F.linear(input_parallel, weight, bias) # XW_i^T + b, output is Y_i
+    return output
+
+def linear_with_async_all_reduce(x, weight, bias):
+    return LinearWithAsyncAllReduce.apply(x, weight, bias)

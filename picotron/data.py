@@ -18,7 +18,7 @@ class MicroBatchDataLoader(DataLoader):
         self.num_global_micro_batches = self.global_batch_size // self.micro_batch_size
         
         self.seq_length_per_gpu = seq_length // pgm.process_group_manager.cp_world_size
-        self.dataset = load_dataset(dataset_name, split=split)
+        self.dataset = load_dataset(dataset_name, split=split, name=subset_name)
 
         if pgm.process_group_manager.global_rank == 0:
             print(f"rank {pgm.process_group_manager.global_rank}: Creating tokenizer")
