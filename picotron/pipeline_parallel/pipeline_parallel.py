@@ -8,11 +8,27 @@ from picotron.pipeline_parallel.pp_communications import pipeline_communicate, b
 class PipelineParallel(nn.Module):
     def __init__(self, model, config):
         super().__init__()
-        layer_distribution = self.distribute_layers(config.num_hidden_layers)
+        self.layer_distribution = self.distribute_layers(config.num_hidden_layers)
         self.embedding = model.embedding if pgm.process_group_manager.pp_is_first_stage else nn.Identity()
-        self.decoder_layers = nn.ModuleDict({str(i): model.decoder_layers[i] for i in layer_distribution})
+        self.decoder_layers = nn.ModuleDict({str(i): model.decoder_layers[i] for i in self.layer_distribution})
         self.final_norm = model.final_norm if pgm.process_group_manager.pp_is_last_stage else nn.Identity()
         self.final_proj = model.final_proj if pgm.process_group_manager.pp_is_last_stage else nn.Identity()
+
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        if pgm.process_group_manager.pp_is_first_stage:
+            self.embedding.reset_parameters()
+
+        for layer in self.decoder_layers.values():
+            layer.input_layernorm.reset_parameters()
+            layer.attention.reset_parameters()
+            layer.post_attention_layernorm.reset_parameters()
+            layer.mlp.reset_parameters()
+
+        if pgm.process_group_manager.pp_is_last_stage:
+            self.final_norm.reset_parameters()
+            self.final_proj.reset_parameters()
 
     def distribute_layers(self, num_layers):
         layers_per_gpu = [num_layers // pgm.process_group_manager.pp_world_size + (1 if i < num_layers % pgm.process_group_manager.pp_world_size else 0) for i in range(pgm.process_group_manager.pp_world_size)]

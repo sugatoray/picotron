@@ -4,7 +4,7 @@
         "cp_size": 1,
         "pp_size": 1,
         "dp_size": 1,
-        "pp_engine": "afab",
+        "pp_engine": "1f1b",
         "backend": "nccl",
         "use_cpu": false
     },
@@ -29,8 +29,9 @@
     },
     "dataset": {
         "name": "roneneldan/TinyStories",
-        "num_workers": 1,
-        "num_proc": 4
+        "subset_name": null,
+        "num_workers": 0,
+        "num_proc": 1
     },
     "checkpoint": {
         "save_dir": "ckpt",
@@ -45,6 +46,7 @@
     "environment": {
         "OMP_NUM_THREADS": "1",
         "TOKENIZERS_PARALLELISM": "false",
-        "FLASH_ATTEN": "1"
+        "FLASH_ATTEN": "1",
+        "HF_TOKEN": null
     }
 }

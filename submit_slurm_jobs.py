@@ -216,5 +216,5 @@ if __name__ == "__main__":
     parser.add_argument('--hf_token', type=str, required=True, help='Huggingface token')
 
     args = parser.parse_args()
-    
+    #TODO: add more option like "python slurm.py submit_jobs --...." or "python slurm.py update_jobs --...." or "python slurm.py cancel_jobs --...." or "python slurm.py check_status --...."
     submit_jobs(args.inp_dir, args.qos, args.hf_token, args.nb_slurm_array, only=args.only)

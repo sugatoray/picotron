@@ -1,107 +1,79 @@
-"""
-Inspired by Fair Scale/Megatron's Tensor Parallelism implementation
-Ref: https://github.com/facebookresearch/fairscale/tree/main/fairscale
-"""
-from picotron.tensor_parallel.tp_utils import merge_first_two_dims, split_tensor_along_last_dim
 import torch.distributed as dist
 import torch
 import picotron.process_group_manager as pgm
 import torch.nn.functional as F
 
-def _reduce(input_):
-    """All-reduce the input tensor across model parallel(Tensor Parallel) group."""    
-    # Bypass the function if we are using only 1 GPU.
-    if pgm.process_group_manager.tp_size == 1:
-        return input_
+from typing import Tuple
 
-    # All-reduce across the tensor parallel group
-    dist.all_reduce(input_, group=pgm.process_group_manager.tp_group)
+def merge_first_two_dims(grad_output: torch.Tensor, input_: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Merge the first two dimensions of tensors."""
+    return grad_output.contiguous().view(-1, *grad_output.shape[2:]), input_.contiguous().view(-1, *input_.shape[2:])
 
-    return input_
+def split_tensor_along_last_dim(tensor, num_partitions):
+    """Split a tensor along its last dimension into num_partitions chunks."""
+    last_dim = tensor.dim() - 1
+    assert tensor.size()[last_dim] % num_partitions == 0, f"{tensor.size()[last_dim]} is not divisible by {num_partitions}"
+    last_dim_size = tensor.size()[last_dim] // num_partitions
+    return torch.split(tensor, last_dim_size, dim=last_dim)
 
-class _CopyToModelParallelRegion(torch.autograd.Function):
-    """copy(identity) in forward pass, all reduce in backward pass"""
+class ReduceFromModelParallelRegion(torch.autograd.Function):
+    """All-reduce in forward pass, identity in backward pass."""
     @staticmethod
-    def forward(ctx, input_):
-        return input_
-    
+    def forward(ctx, x):
+        if pgm.process_group_manager.tp_world_size == 1:
+            return x
+        dist.all_reduce(x, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.tp_group)
+        return x
+
     @staticmethod
     def backward(ctx, grad_output):
-        return _reduce(grad_output)
-
-class _ReduceFromModelParallelRegion(torch.autograd.Function):
-    """all reduce in forward pass, copy(identity) in backward pass"""
-    @staticmethod
-    def forward(ctx, input_):  # type: ignore
-        return _reduce(input_)
-
-    @staticmethod
-    def backward(ctx, grad_output):  # type: ignore
         return grad_output
 
-# This is the `f` function in the paper: https://arxiv.org/abs/1909.08053
-def copy_to_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
-    return _CopyToModelParallelRegion.apply(input_)
-
-# This is the `g` function in the paper, which is the conjugate of `f`
-def reduce_from_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
-    return _ReduceFromModelParallelRegion.apply(input_)
-
-def _split(input_: torch.Tensor) -> torch.Tensor:
-    """Split the tensor along its last dimension and keep the corresponding slice."""
-    tp_rank = pgm.process_group_manager.tp_rank
-    tp_world_size = pgm.process_group_manager.tp_size
-
-    # Bypass the function if we are using only 1 GPU
-    if tp_world_size == 1:
-        return input_
-
-    # Split along last dimension and keep the corresponding slice
-    input_list = split_tensor_along_last_dim(input_, tp_world_size)
-    output = input_list[tp_rank].contiguous()
-
-    return output
-
-def _gather(input_: torch.Tensor) -> torch.Tensor:
-    """Gather tensors and concatinate along the last dimension."""
-    tp_rank = pgm.process_group_manager.tp_rank
-    tp_world_size = pgm.process_group_manager.tp_size
-
-    # Bypass the function if we are using only 1 GPU.
-    if tp_world_size == 1:
-        return input_
-
-    # Size and dimension.
-    last_dim = input_.dim() - 1
-
-    tensor_list = [torch.empty_like(input_) for _ in range(tp_world_size)]
-    tensor_list[tp_rank] = input_
-    torch.distributed.all_gather(tensor_list, input_, group=pgm.process_group_manager.tp_group)
-
-    output = torch.cat(tensor_list, dim=last_dim).contiguous()
-
-    return output
-
-class _GatherFromModelParallelRegion(torch.autograd.Function):
-    """Gathher in the forward pass, split in the backward pass."""
+class GatherFromModelParallelRegion(torch.autograd.Function):
+    """Gather in forward pass, split in backward pass."""
+    @staticmethod
+    def forward(ctx, x):
+        if pgm.process_group_manager.tp_world_size == 1:
+            return x
+        last_dim = x.dim() - 1
+        # Need contiguous tensors for collectives -> https://github.com/pytorch/pytorch/blob/main/torch/distributed/nn/functional.py#L321
+        x = x.contiguous()
+        tensor_list = [torch.empty_like(x) for _ in range(pgm.process_group_manager.tp_world_size)]
+        tensor_list[pgm.process_group_manager.tp_rank] = x
+        dist.all_gather(tensor_list, x, group=pgm.process_group_manager.tp_group)
+        output = torch.cat(tensor_list, dim=last_dim).contiguous()
+        return output
 
     @staticmethod
-    def forward(ctx, input_): 
-        return _gather(input_)
+    def backward(ctx, grad_output):
+        if pgm.process_group_manager.tp_world_size == 1:
+            return grad_output
+        # Split gradient according to TP size
+        chunks = split_tensor_along_last_dim(grad_output, pgm.process_group_manager.tp_world_size)
+        return chunks[pgm.process_group_manager.tp_rank].contiguous()
+
+class CopyToModelParallelRegion(torch.autograd.Function):
+    """Copy in forward pass, all-reduce in backward pass."""
+    @staticmethod
+    def forward(ctx, x):
+        return x
 
     @staticmethod
-    def backward(ctx, grad_output):  
-        return _split(grad_output)
+    def backward(ctx, grad_output):
+        if pgm.process_group_manager.tp_world_size == 1:
+          return grad_output
+        dist.all_reduce(grad_output, op=dist.ReduceOp.SUM, group=pgm.process_group_manager.tp_group)
+        return grad_output
 
-def gather_from_model_parallel_region(input_: torch.Tensor) -> torch.Tensor:
-    return _GatherFromModelParallelRegion.apply(input_)
-
-def linear_with_all_reduce(input_, weight, bias):
-    input_parallel = copy_to_model_parallel_region(input_)
+def linear_with_all_reduce(x, weight, bias):
+    input_parallel = CopyToModelParallelRegion.apply(x)
     output = F.linear(input_parallel, weight, bias) # XW_i^T + b, output is Y_i
     return output
 
-class _LinearWithAsyncAllReduce(torch.autograd.Function):
+def linear_with_async_all_reduce(x, weight, bias):
+    return LinearWithAsyncAllReduce.apply(x, weight, bias)
+
+class LinearWithAsyncAllReduce(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_, weight, bias):
         ctx.save_for_backward(input_, weight)
@@ -129,6 +101,3 @@ class _LinearWithAsyncAllReduce(torch.autograd.Function):
         grad_bias = grad_output.sum(0) if ctx.use_bias else None
         input_gradient_all_reduce_handle.wait()
         return grad_input, grad_weight, grad_bias
-
-def linear_with_async_all_reduce(input_, weight, bias):
-    return _LinearWithAsyncAllReduce.apply(input_, weight, bias)
