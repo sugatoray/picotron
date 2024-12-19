@@ -4,7 +4,7 @@ In the spirit of [NanoGPT](https://github.com/karpathy/nanoGPT), we created Pico
 ![](assets/banière.png)
 - The code itself is simple and readable: `train.py`, `model.py` and `[data|tensor|pipeline|context]_parallel.py` are all under **300** lines of code.
 
-- Performance is not the best but okay-ish, and still under active development. We observed 38% MFU on a LLaMA-2-7B model using 64 H100 GPUs and nearly 50% MFU on the SmolLM-1.7B model with 8 H100 GPUs. Benchmarks will come soon
+- Performance is not the best but still under active development. We observed 38% MFU on a LLaMA-2-7B model using 64 H100 GPUs and nearly 50% MFU on the SmolLM-1.7B model with 8 H100 GPUs. Benchmarks will come soon
 
 # Install
 
