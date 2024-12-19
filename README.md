@@ -2,9 +2,9 @@
 In the spirit of [NanoGPT](https://github.com/karpathy/nanoGPT), we created Picotron: The minimalist & most-hackable repository for pre-training Llama-like models with [4D Parallelism](https://arxiv.org/abs/2407.21783) (Data, Tensor, Pipeline, Context parallel). It is designed with simplicity and **educational** purposes in mind, making it an excellent tool for learning and experimentation.
 
 ![](assets/banière.png)
-- The code itself is simple and readable: train.py, model.py and \[data|tensor|pipeline|context\]_parallel.py are all under **300** lines of code.
+- The code itself is simple and readable: `train.py`, `model.py` and `[data|tensor|pipeline|context]_parallel.py` are all under **300** lines of code.
 
-- Performance is not the best but okay-ish, and still under active development. We observed 38% MFU on a LLaMA-2-7B model using 64 H100 GPUs and nearly 50% MFU on the SmolLM-1.7B model with 8 H100 GPUs.
+- Performance is not the best but okay-ish, and still under active development. We observed 38% MFU on a LLaMA-2-7B model using 64 H100 GPUs and nearly 50% MFU on the SmolLM-1.7B model with 8 H100 GPUs. Benchmarks will come soon
 
 # Install
 
