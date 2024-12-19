@@ -143,9 +143,10 @@ if __name__ == "__main__":
     if pgm.process_group_manager.global_rank == 0:
         print(f"rank {pgm.process_group_manager.global_rank}: Creating model config")
         model_config = AutoConfig.from_pretrained(config["model"]["name"])
-        model_config.num_hidden_layers = config["model"]["num_hidden_layers"]
-        model_config.num_attention_heads = config["model"]["num_attention_heads"]
-        model_config.num_key_value_heads = config["model"]["num_key_value_heads"]
+        # twist the model structure if specified in the config file
+        model_config.num_hidden_layers = model_config.num_hidden_layers if "num_hidden_layers" not in config["model"] else config["model"]["num_hidden_layers"]
+        model_config.num_attention_heads = model_config.num_attention_heads if "num_attention_heads" not in config["model"] else config["model"]["num_attention_heads"]
+        model_config.num_key_value_heads = model_config.num_key_value_heads if "num_key_value_heads" not in config["model"] else config["model"]["num_key_value_heads"]
         model_config.max_position_embeddings = config["training"]["seq_length"]
         objects = [model_config]
     else:
