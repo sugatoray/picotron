@@ -1,10 +1,10 @@
 # picotron
+The minimalist & most-hackable repository for pre-training Llama-like models with [4D Parallelism](https://arxiv.org/abs/2407.21783) (Data, Tensor, Pipeline, Context parallel). It is a rewrite of [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) for **educational** purpose. 
 
 ![](assets/banière.png)
+- The code itself is simple and readable: **train.py, model.py and \[data|tensor|pipeline|context\]_parallel.py are all under 300 lines of code**.
 
-- The minimalist & most-hackable repository for pre-training Llama-like models with 4D Parallelism (Data, Tensor, Pipeline, Context parallel). It is a rewrite of [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) for educational purpose. The code itself is plain and readable: **train.py, model.py and \[data|tensor|pipeline|context\]_parallel.py are all < 300 LOC**.
-
-- Performance is not yet in okay-ish but this is under active development.
+- Performance is not the best but okay-ish, and still under active development. We observed 38% MFU on a LLaMA-2-7B model on 64 H100s and nearly 50% MFU on SmolLM-1.7B model on 8 H100s.
 
 # Install
 
@@ -16,7 +16,7 @@ pip install -e .
 
 - GPU
 ```sh
-# DP=8
+# To create a config file in json format
 python create_config.py --out_dir tmp --exp_name llama-1B --dp 8 --model_name HuggingFaceTB/SmolLM-1.7B --num_hidden_layers 15  --grad_acc_steps 32 --mbs 4 --seq_len 1024 --hf_token <HF_TOKEN>
 
 # Locally
@@ -42,3 +42,5 @@ torchrun --nproc_per_node 8 train.py --config tmp/llama-1B-cpu/config.json
 # Acknowledgements
 
 - [Megatron-LM](https://github.com/NVIDIA/Megatron-LM)
+- [FairScale](https://github.com/facebookresearch/fairscale)
+- [LitGPT](https://github.com/Lightning-AI/lit-gpt)
